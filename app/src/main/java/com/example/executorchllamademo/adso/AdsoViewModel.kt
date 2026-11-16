@@ -172,7 +172,7 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
             }
             Screen.GAPS -> Screen.CHECK
             Screen.EDIT_GOALS -> Screen.SETTINGS
-            Screen.QUIZ, Screen.RESULT -> { quizJob?.cancel(); nextQuestion?.cancel(); Screen.HOME }
+            Screen.QUIZ, Screen.RESULT -> { quizJob?.cancel(); nextQuestion?.cancel(); stopLlamaQuestions(); Screen.HOME }
             Screen.LESSON -> { lessonJob?.cancel(); LlamaEngine.stop(); Screen.HOME }
             Screen.CHAT -> { if (chatBusy) stopChat(); Screen.HOME }
             Screen.PLAN, Screen.PROGRESS, Screen.SETTINGS -> Screen.HOME
@@ -393,28 +393,60 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
         else -> "Medium" to "medium"
     }
 
-    /** Writes question [index] with Llama, or takes one from the built-in bank if that fails. */
-    private fun fetchQuestion(index: Int, correctSoFar: Int): Deferred<Pair<QuizQuestion, Boolean>> = viewModelScope.async {
-        val topic = quizTopic
-        val avoid = quizQs.map { it.text }
-        val llama = Advisor.question(getApplication(), topic, difficultyFor(correctSoFar, index).second, profile, avoid)
-        if (llama != null) llama to true
-        else {
-            val bank = Courses.courseOf(topic).bank[topic].orEmpty()
-            val fromBank = bank.firstOrNull { it.text !in avoid }
-            (fromBank ?: QuizQuestion(
-                "Llama isn’t available, and this course has no built-in question for “${Courses.topic(topic).name}”. Load a model in Settings, then try again.",
-                listOf("OK", "Go back", "Later", "Skip"), 0, "Questions for your own courses are written by Llama on the phone.",
-            )) to false
+    // Llama writes questions in the background while the learner answers; only answer-checked ones are queued.
+    private val llamaQueue = mutableListOf<QuizQuestion>()
+    private var llamaGenJob: Job? = null
+
+    private fun startLlamaQuestions(topic: String) {
+        llamaGenJob?.cancel()
+        llamaQueue.clear()
+        llamaGenJob = viewModelScope.launch {
+            var failures = 0
+            while (llamaQueue.size < 2 && quizQs.size + llamaQueue.size < quizTotal + 1 && failures < 2) {
+                val avoid = quizQs.map { it.text } + llamaQueue.map { it.text }
+                val q = Advisor.question(getApplication(), topic, difficultyFor(quizCorrect, quizQs.size).second, profile, avoid)
+                if (q != null) llamaQueue.add(q) else failures++
+            }
         }
     }
 
+    private fun stopLlamaQuestions() {
+        if (llamaGenJob?.isActive == true) LlamaEngine.stop()
+        llamaGenJob?.cancel()
+    }
+
+    /**
+     * The next question: a Llama question if one is ready and checked, else the next unused question from the
+     * built-in bank (instant). Courses without a bank (made by Llama) wait for Llama.
+     */
+    private fun fetchQuestion(): Deferred<Pair<QuizQuestion, Boolean>> = viewModelScope.async {
+        val topic = quizTopic
+        val shown = quizQs.map { it.text }.toSet()
+        llamaQueue.removeFirstOrNull()?.let { return@async it to true }
+        val bank = Courses.courseOf(topic).bank[topic].orEmpty()
+        bank.firstOrNull { it.text !in shown }?.let { return@async it to false }
+        // Bank used up: wait briefly for Llama, then repeat a bank question. No bank (own course): wait up to ~2 min.
+        repeat(if (bank.isEmpty()) 40 else 7) {
+            llamaQueue.removeFirstOrNull()?.let { return@async it to true }
+            if (llamaGenJob?.isActive != true) return@repeat
+            kotlinx.coroutines.delay(3000)
+        }
+        llamaQueue.removeFirstOrNull()?.let { return@async it to true }
+        bank.randomOrNull()?.let { return@async it to false } // repeat one rather than stop the quiz
+        QuizQuestion(
+            "AdSo couldn’t write a question for “${Courses.topic(topic).name}” just now. Which would you like to do?",
+            listOf("Read the lesson again", "Ask AdSo in the chat", "Try the quiz later", "Continue"), 3,
+            "Questions for your own courses are written by Llama on the phone, and this time its answer didn’t pass the check.",
+        ) to false
+    }
+
     fun startQuiz(topicId: String = firstSession.topicId) {
-        quizJob?.cancel(); nextQuestion?.cancel()
+        quizJob?.cancel(); nextQuestion?.cancel(); stopLlamaQuestions()
         quizTopic = topicId; quizIndex = 0; quizPicked = null; quizChecked = false; quizCorrect = 0
         quizQs.clear(); quizFromLlama.clear()
         screen = Screen.QUIZ
-        showQuestion(fetchQuestion(0, 0))
+        startLlamaQuestions(topicId)
+        showQuestion(fetchQuestion())
     }
 
     private fun showQuestion(pending: Deferred<Pair<QuizQuestion, Boolean>>) {
@@ -434,17 +466,15 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
         if (quizChecked) return
         quizChecked = true
         if (p == q.answer) quizCorrect++
-        // Start writing the next question now, while the learner reads the feedback.
-        if (quizIndex + 1 < quizTotal) nextQuestion = fetchQuestion(quizIndex + 1, quizCorrect)
     }
 
     fun nextQuiz() {
         if (quizIndex + 1 < quizTotal) {
             quizIndex++; quizPicked = null; quizChecked = false
-            showQuestion(nextQuestion ?: fetchQuestion(quizIndex, quizCorrect))
-            nextQuestion = null
+            showQuestion(fetchQuestion())
             return
         }
+        stopLlamaQuestions()
         finishQuiz()
     }
 

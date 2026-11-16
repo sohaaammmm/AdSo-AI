@@ -269,7 +269,7 @@ fun AddCourseScreen(vm: AdsoViewModel) {
                 Spacer(Modifier.size(28.dp))
                 Text("Designing “$name”…", style = MaterialTheme.typography.titleLarge, color = c.textPrimary, textAlign = TextAlign.Center)
                 Spacer(Modifier.size(8.dp))
-                Text("Llama is writing 5 topics and a skill check on this phone. This takes about 1–2 minutes.", color = c.textSecondary, fontSize = 14.sp, lineHeight = 20.sp, textAlign = TextAlign.Center)
+                Text("Llama is choosing 5 topics for it on this phone. This takes about half a minute.", color = c.textSecondary, fontSize = 14.sp, lineHeight = 20.sp, textAlign = TextAlign.Center)
                 Spacer(Modifier.size(12.dp))
                 Tag("${vm.newCourseProgress} characters written", c.info, c.infoTile)
             }
@@ -294,7 +294,7 @@ fun AddCourseScreen(vm: AdsoViewModel) {
             }
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Eyebrow("Your own course")
-                Text("Type any subject. Llama designs 5 topics and a skill check for it, on this phone.", color = c.textSecondary, fontSize = 14.sp, lineHeight = 20.sp)
+                Text("Type any subject. Llama picks 5 topics for it on this phone, then you rate how well you know each one.", color = c.textSecondary, fontSize = 14.sp, lineHeight = 20.sp)
                 AdsoTextField(name, { name = it }, "e.g. Operating Systems, Organic Chemistry", onDone = { vm.createCourse(name) })
                 vm.newCourseError?.let { Text(it, color = c.error, fontSize = 13.sp, lineHeight = 18.sp) }
                 PrimaryButton("Design with Llama", { vm.createCourse(name) }, Modifier.fillMaxWidth(), enabled = name.isNotBlank(), leading = Icons.Rounded.AutoAwesome)

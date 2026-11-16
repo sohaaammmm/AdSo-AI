@@ -331,7 +331,7 @@ fun QuizScreen(vm: AdsoViewModel) {
                 Text(tr("Writing your next question…"), style = MaterialTheme.typography.titleLarge, color = c.textPrimary, textAlign = TextAlign.Center)
                 Spacer(Modifier.size(6.dp))
                 Text(
-                    "${vm.quizDifficulty} · ${Content.topic(vm.quizTopic).name}\nLlama writes each question on this phone, so it can match how you’re doing.",
+                    "${vm.quizDifficulty} · ${Content.topic(vm.quizTopic).name}\nLlama is writing a question on this phone and checking its answer.",
                     color = c.textSecondary, fontSize = 14.sp, lineHeight = 20.sp, textAlign = TextAlign.Center,
                 )
             }

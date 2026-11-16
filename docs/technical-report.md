@@ -46,9 +46,9 @@ Test phone: **TECNO POVA 5 Pro 5G** (TECNO LH8n), MediaTek Dimensity 6080 (Arm C
 |---|---|---|
 | Model load time | **21.1 s** | **6.7 s** (1.4 s in an earlier run with more free memory) |
 | Generation speed | **2.1 tokens/s** | **8.2 tokens/s** |
-| Learning pathway (5 topics, JSON) | TODO | TODO |
-| One adaptive quiz question | ≈ 49 s (first question, model already loaded) | TODO |
-| Lesson (≈ 150 words) | ≈ 40 s | TODO |
+| Learning pathway (5 topics, JSON) | TODO | **31 s** (50 s including model load) |
+| One Llama quiz question (written + answer-checked) | ≈ 49 s, no check yet | 45–75 s per attempt; most 1B attempts failed the answer check |
+| Lesson (≈ 150 words) | ≈ 40 s | **26 s** (Learn/Practice), 72 s (Review) |
 | Chat answer, "Explain a linked list with a simple example" | **150 s** (≈ 300 words) | **43 s** |
 | App memory while running (PSS) | TODO (`adb shell dumpsys meminfo com.example.adsoai`) | TODO |
 
@@ -84,17 +84,30 @@ AdsoActivity (single activity, Jetpack Compose, hand-written navigation)
 | Feature | Prompt asks for | Output | Fallback if unusable |
 |---|---|---|---|
 | Learning pathway | Order all topics for this learner; a reason and a goal per topic | JSON | Rule order: needs work → new → strong |
-| Adaptive quiz | One MCQ on the topic at a difficulty chosen from the learner's last answers | JSON | Built-in question bank |
+| Adaptive quiz | One MCQ on the topic at a difficulty chosen from the learner's last answers, then an independent answer check | JSON + 1 letter | Built-in (checked) question bank, shown instantly |
 | Lessons | Learn / Practice / Review text tailored to goal and interests | Streamed text | Message + go to quiz |
 | Ask AdSo chat | Tutor answer that knows the learner's goal, course and gaps | Streamed text | Error message |
-| New course | 5 topics + 5 skill-check questions for any subject the learner types | JSON | Ask to retry or pick a built-in course |
+| New course | 5 topics with goals for any subject the learner types (skill check = self-rating) | JSON | Ask to retry or pick a built-in course |
 
 **Structured output at temperature 0.7.** The project requires sampling at 0.7–0.8, which makes JSON less
 reliable than greedy decoding. AdSo handles this by: asking for JSON only with a one-line example; extracting
 the first `{…}` block (ignoring extra text or code fences); validating every field (ids, 4 distinct options,
 answer index); retrying once; and falling back to rules or the question bank, with the UI saying which was
-used ("Written by Llama" / "Question bank"). In testing, most replies parsed; one of three quiz questions
-fell back to the bank after two unusable replies.
+used ("Written by Llama" / "Question bank").
+
+Findings from testing on the phone, and the fixes:
+- **Truncated / malformed JSON.** 1B often wrote slightly broken JSON (extra `}`) or ran into the token limit,
+  so the first pathway attempts fell back to rules. Fix: a larger output budget, and a salvage step that keeps
+  every complete `{...}` step; topic ids are matched loosely (id, short id, name or number). After the fix the
+  pathway was written by Llama 1B in 31 s.
+- **Wrong answer keys.** 1B once marked the wrong option as correct (union of two sets). Fix: every
+  Llama-written question is checked by a second, independent one-letter request; it is used only if both
+  agree. With 1B most questions then failed the check, so the quiz now shows checked **bank questions
+  instantly** and mixes in Llama questions written in the background only when they pass. Custom courses
+  (no bank) wait for Llama.
+- **Speed of course design.** Asking 1B for topics *and* a 5-question skill check took several minutes.
+  Fix: Llama writes only the 5 topics and goals (~200 tokens, about half a minute); a custom course's skill
+  check is a quick self-rating per topic.
 
 ## 6. Features
 
