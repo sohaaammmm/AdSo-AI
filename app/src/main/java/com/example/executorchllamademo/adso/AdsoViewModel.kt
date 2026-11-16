@@ -1,0 +1,576 @@
+package com.example.executorchllamademo.adso
+
+import android.app.Application
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.example.executorchllamademo.adso.data.AdsoDatabase
+import com.example.executorchllamademo.adso.data.ChatEntity
+import com.example.executorchllamademo.adso.data.ChatMessageEntity
+import com.example.executorchllamademo.adso.data.CheckQuestion
+import com.example.executorchllamademo.adso.data.Course
+import com.example.executorchllamademo.adso.data.CourseEntity
+import com.example.executorchllamademo.adso.data.Courses
+import com.example.executorchllamademo.adso.data.DayLogEntity
+import com.example.executorchllamademo.adso.data.ProfileEntity
+import com.example.executorchllamademo.adso.data.QuizQuestion
+import com.example.executorchllamademo.adso.data.SessionKind
+import com.example.executorchllamademo.adso.data.SkillEntity
+import com.example.executorchllamademo.adso.data.SkillLevel
+import com.example.executorchllamademo.adso.llm.Advisor
+import com.example.executorchllamademo.adso.llm.LlamaEngine
+import com.example.executorchllamademo.adso.llm.PathStep
+import com.example.executorchllamademo.adso.llm.Pathway
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
+import java.time.format.TextStyle
+import java.util.Locale
+
+enum class Screen { WELCOME, PROFILE, EDIT_GOALS, COURSES, ADD_COURSE, CHECK, GAPS, GENERATING, HOME, PLAN, PROGRESS, SETTINGS, QUIZ, RESULT, LESSON, CHAT }
+
+data class Session(val kind: SessionKind, val topicId: String, val why: String, val minutes: Int)
+data class PlanDay(val label: String, val sessions: List<Session>) {
+    val totalMinutes get() = sessions.sumOf { it.minutes }
+}
+data class QuizResult(val topicId: String, val correct: Int, val total: Int, val newLevel: SkillLevel, val note: String)
+data class ChatMsg(val mine: Boolean, val text: String, val meta: String = "")
+
+/**
+ * AdSo's learning logic: goals, skill check, learning pathway, study plan, lessons, adaptive quiz,
+ * chat and progress. Everything is stored on the phone with Room.
+ *
+ * Llama on the phone (LlamaEngine + Advisor) writes the pathway, quiz questions, lessons, chat answers
+ * and new courses. If the model is missing or a reply can't be parsed, AdSo falls back to built-in
+ * rules and content and says so in the UI.
+ */
+class AdsoViewModel(app: Application) : AndroidViewModel(app) {
+    private val dao = AdsoDatabase.get(app).dao()
+    private val iso = DateTimeFormatter.ISO_LOCAL_DATE
+    private val saveLock = Mutex()
+
+    var ready by mutableStateOf(false); private set
+    var screen by mutableStateOf(Screen.WELCOME); private set
+    var profile by mutableStateOf(ProfileEntity()); private set
+    var planTabRoute by mutableStateOf(false)
+    var generatingTitle by mutableStateOf("Building your plan…"); private set
+    var generatingDetail by mutableStateOf(""); private set
+
+    // Courses and skills
+    var course by mutableStateOf(Courses.dataStructures); private set
+    var addedCourses by mutableStateOf(listOf("ds")); private set
+    var levels by mutableStateOf(emptyMap<String, SkillLevel>()); private set
+    var baseLevels by mutableStateOf(emptyMap<String, SkillLevel>()); private set
+    var completed by mutableStateOf(emptySet<String>()); private set
+    private var pathways by mutableStateOf(emptyMap<String, Pathway>())
+    val pathway: Pathway? get() = pathways[course.id]
+    val topics get() = course.topics
+    val hasSkillCheck get() = topics.any { it.id in baseLevels }
+
+    // Skill check
+    var checkIndex by mutableIntStateOf(0); private set
+    var checkPicked by mutableStateOf<Int?>(null); private set
+    private val checkAnswers = mutableStateListOf<Int>()
+
+    // Quiz (questions are written one at a time, so the next one can match how you're doing)
+    var quizTopic by mutableStateOf("sq"); private set
+    var quizIndex by mutableIntStateOf(0); private set
+    var quizPicked by mutableStateOf<Int?>(null); private set
+    var quizChecked by mutableStateOf(false); private set
+    var quizCorrect by mutableIntStateOf(0); private set
+    var lastResult by mutableStateOf<QuizResult?>(null); private set
+    private val quizQs = mutableStateListOf<QuizQuestion>()
+    private val quizFromLlama = mutableStateListOf<Boolean>()
+    var quizLoading by mutableStateOf(false); private set
+    private var nextQuestion: Deferred<Pair<QuizQuestion, Boolean>>? = null
+    private var quizJob: Job? = null
+    val quizTotal = 3
+
+    // Lesson
+    var lessonSession by mutableStateOf<Session?>(null); private set
+    var lessonText by mutableStateOf(""); private set
+    var lessonLoading by mutableStateOf(false); private set
+    var lessonFailed by mutableStateOf(false); private set
+    private var lessonJob: Job? = null
+
+    // Add course
+    var newCourseBusy by mutableStateOf(false); private set
+    var newCourseProgress by mutableIntStateOf(0); private set
+    var newCourseError by mutableStateOf<String?>(null); private set
+
+    // Chat
+    var chats by mutableStateOf(emptyList<ChatEntity>()); private set
+    var chatId by mutableStateOf<Long?>(null); private set
+    val chatMessages = mutableStateListOf<ChatMsg>()
+    var chatStreaming by mutableStateOf<String?>(null); private set
+    var chatBusy by mutableStateOf(false); private set
+    private var chatJob: Job? = null
+
+    // Progress
+    var week by mutableStateOf(emptyList<Pair<String, Int>>()); private set
+    var weekSessions by mutableIntStateOf(0); private set
+    var accuracy by mutableStateOf<Int?>(null); private set
+
+    init {
+        viewModelScope.launch {
+            dao.profile()?.let { profile = it }
+            LlamaEngine.temperature = profile.temperature.coerceIn(0.7f, 0.8f)
+            // Courses the learner added (custom ones are registered so the rest of the app can find them).
+            val saved = dao.courses()
+            saved.filter { it.custom }.forEach { e -> Course.fromJson(e.id, e.title, e.topicsJson, e.checkJson)?.let(Courses::register) }
+            val p = saved.mapNotNull { e -> Pathway.fromJson(e.pathwayJson)?.let { e.id to it } }.toMap().toMutableMap()
+            if ("ds" !in p) Pathway.fromJson(profile.pathwayJson)?.let { p["ds"] = it } // older installs
+            pathways = p
+            addedCourses = (listOf("ds") + saved.map { it.id }).distinct()
+            course = Courses.get(profile.activeCourse)
+            loadSkills()
+            refreshProgress()
+            chats = dao.chats()
+            screen = if (profile.onboarded) Screen.HOME else Screen.WELCOME
+            ready = true
+        }
+    }
+
+    private suspend fun loadSkills() {
+        val rows = dao.skills()
+        levels = rows.associate { it.topicId to SkillLevel.valueOf(it.level) }
+        baseLevels = rows.associate { it.topicId to SkillLevel.valueOf(it.baseLevel) }
+        completed = rows.filter { it.completed }.map { it.topicId }.toSet()
+    }
+
+    /** Level shown for a topic; before the skill check, every topic counts as new. */
+    fun levelOf(topicId: String) = levels[topicId] ?: SkillLevel.NEW
+
+    private fun saveSkillsNow() {
+        val rows = (levels.keys + baseLevels.keys).map { id ->
+            SkillEntity(id, (baseLevels[id] ?: levelOf(id)).name, levelOf(id).name, id in completed)
+        }
+        viewModelScope.launch { saveLock.withLock { dao.saveSkills(rows) } }
+    }
+
+    // ---------- navigation ----------
+    fun go(s: Screen) { screen = s }
+
+    /** Returns false when the system should handle Back (leave the app). */
+    fun back(): Boolean {
+        screen = when (screen) {
+            Screen.PROFILE -> Screen.WELCOME
+            Screen.COURSES -> if (profile.onboarded) Screen.SETTINGS else Screen.PROFILE
+            Screen.ADD_COURSE -> { if (newCourseBusy) return true; Screen.COURSES }
+            Screen.CHECK -> {
+                if (checkIndex > 0) { checkIndex--; checkPicked = checkAnswers.removeLastOrNull(); return true }
+                Screen.COURSES
+            }
+            Screen.GAPS -> Screen.CHECK
+            Screen.EDIT_GOALS -> Screen.SETTINGS
+            Screen.QUIZ, Screen.RESULT -> { quizJob?.cancel(); nextQuestion?.cancel(); Screen.HOME }
+            Screen.LESSON -> { lessonJob?.cancel(); LlamaEngine.stop(); Screen.HOME }
+            Screen.CHAT -> { if (chatBusy) stopChat(); Screen.HOME }
+            Screen.PLAN, Screen.PROGRESS, Screen.SETTINGS -> Screen.HOME
+            Screen.WELCOME, Screen.HOME, Screen.GENERATING -> return false
+        }
+        return true
+    }
+
+    // ---------- profile and goals ----------
+    /**
+     * Updates the profile and saves it. Saves run one at a time and always write the newest
+     * profile, so fast typing can't leave an older value (this was the "Priy" bug).
+     */
+    fun updateProfile(change: ProfileEntity.() -> ProfileEntity) {
+        profile = profile.change()
+        viewModelScope.launch { saveLock.withLock { dao.saveProfile(profile) } }
+    }
+
+    val interestSet get() = profile.interests.split(',').filter { it.isNotBlank() }.toSet()
+    fun toggleInterest(i: String) = updateProfile {
+        val set = interestSet.toMutableSet().apply { if (!add(i)) remove(i) }
+        copy(interests = set.joinToString(","))
+    }
+
+    fun setTemperature(t: Float) {
+        val v = (Math.round(t * 100) / 100f).coerceIn(0.7f, 0.8f)
+        LlamaEngine.temperature = v
+        updateProfile { copy(temperature = v) }
+    }
+
+    fun deadlineLabel(): String {
+        if (profile.deadlineDays <= 0) return "no fixed date"
+        return LocalDate.now().plusDays(profile.deadlineDays.toLong()).format(DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH))
+    }
+
+    fun saveGoalsAndReplan() = buildPlanAnimated("Updating your plan…", "Re-fitted to ${profile.minutesPerDay} minutes a day until ${deadlineLabel()}.")
+
+    // ---------- courses ----------
+    fun switchCourse(id: String) {
+        course = Courses.get(id)
+        updateProfile { copy(activeCourse = id) }
+        screen = if (hasSkillCheck) Screen.HOME else Screen.COURSES
+    }
+
+    /** Adds a built-in course and starts its skill check. */
+    fun addCourse(id: String) {
+        addedCourses = (addedCourses + id).distinct()
+        viewModelScope.launch { saveLock.withLock { dao.saveCourse(CourseEntity(id, Courses.get(id).title)) } }
+        course = Courses.get(id)
+        updateProfile { copy(activeCourse = id) }
+        startSkillCheck()
+    }
+
+    /** Asks Llama to design a new course from its name, then starts its skill check. */
+    fun createCourse(name: String) {
+        if (name.isBlank() || newCourseBusy) return
+        newCourseBusy = true; newCourseError = null; newCourseProgress = 0
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val c = if (LlamaEngine.ensureLoaded(ctx)) Advisor.newCourse(ctx, profile, name) { newCourseProgress = it } else null
+            newCourseBusy = false
+            if (c == null) {
+                newCourseError = if (LlamaEngine.status == LlamaEngine.Status.MISSING) "No model on this phone, so AdSo can't design a course. Pick one of the built-in courses."
+                else "Llama's answer couldn't be used. Try again, or use a shorter course name."
+                return@launch
+            }
+            Courses.register(c)
+            saveLock.withLock { dao.saveCourse(CourseEntity(c.id, c.title, c.topicsJson(), c.checkJson(), "", custom = true)) }
+            addedCourses = (addedCourses + c.id).distinct()
+            course = c
+            updateProfile { copy(activeCourse = c.id) }
+            startSkillCheck()
+        }
+    }
+
+    fun courseProgress(c: Course) = c.topics.count { it.id in completed } * 100 / c.topics.size.coerceAtLeast(1)
+
+    // ---------- skill check ----------
+    val checkQuestions: List<CheckQuestion> get() = course.check
+    val checkQuestion: CheckQuestion get() = checkQuestions[checkIndex.coerceAtMost(checkQuestions.lastIndex)]
+    val checkIsLast get() = checkIndex >= checkQuestions.lastIndex
+
+    fun startSkillCheck() {
+        checkIndex = 0; checkPicked = null; checkAnswers.clear()
+        screen = Screen.CHECK
+    }
+
+    fun pickCheck(i: Int) { checkPicked = i }
+
+    fun nextCheck() {
+        val picked = checkPicked ?: return
+        checkAnswers.add(picked)
+        if (!checkIsLast) { checkIndex++; checkPicked = null; return }
+        val found = checkQuestions.mapIndexed { i, q ->
+            q.topicId to when (checkAnswers[i]) { q.answer -> SkillLevel.STRONG; q.notSureIndex -> SkillLevel.NEW; else -> SkillLevel.SHAKY }
+        }.toMap()
+        levels = levels + found
+        baseLevels = baseLevels + found
+        completed = completed - found.keys // a fresh check restarts this course's pathway
+        saveSkillsNow()
+        viewModelScope.launch { addStudy(minutes = 3, sessions = 1) }
+        screen = Screen.GAPS
+    }
+
+    fun count(level: SkillLevel) = topics.count { levelOf(it.id) == level }
+
+    fun makePlan() = buildPlanAnimated("Building your plan…", "")
+
+    /** Asks Llama for the pathway (falls back to rules), saves it, then opens the plan. */
+    private fun buildPlanAnimated(title: String, note: String) {
+        generatingTitle = title
+        generatingDetail = "Loading Llama on this phone…"
+        screen = Screen.GENERATING
+        planTabRoute = false
+        val c = course
+        viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val loaded = LlamaEngine.ensureLoaded(ctx)
+            generatingDetail = if (loaded) "${LlamaEngine.modelName?.substringBefore("-Instruct") ?: "Llama"} is ordering your topics…"
+            else "Model not available, using AdSo’s built-in rules…"
+            val start = System.currentTimeMillis()
+            val lv = c.topics.associate { it.id to levelOf(it.id) }
+            val pw = if (loaded) Advisor.pathway(ctx, profile, c, lv, deadlineLabel()) else Advisor.rulesPathway(c, lv)
+            pathways = pathways + (c.id to pw)
+            val secs = (System.currentTimeMillis() - start) / 1000
+            val fullNote = listOfNotNull(
+                note.ifBlank { null },
+                if (pw.byLlama) "Pathway written by Llama on this phone in ${secs}s." else "Pathway from AdSo’s rules (Llama wasn’t available or its answer couldn’t be used).",
+                pw.summary.ifBlank { null },
+            ).joinToString(" ")
+            val existing = dao.courses().firstOrNull { it.id == c.id }
+            saveLock.withLock { dao.saveCourse((existing ?: CourseEntity(c.id, c.title)).copy(pathwayJson = pw.toJson())) }
+            addedCourses = (addedCourses + c.id).distinct()
+            updateProfile { copy(onboarded = true, planNote = fullNote) }
+            screen = Screen.PLAN
+        }
+    }
+
+    // ---------- pathway and plan ----------
+    /** Pathway steps in Llama's order. Finished topics go last. */
+    val route: List<PathStep>
+        get() = (pathway ?: Advisor.rulesPathway(course, topics.associate { it.id to levelOf(it.id) })).steps
+            .filter { s -> topics.any { it.id == s.topicId } }
+            .sortedBy { if (it.topicId in completed) 1 else 0 }
+
+    /** Topics finished in AdSo (quiz passed or reviewed), not just "strong" in the skill check. */
+    val pathwayDone get() = topics.count { it.id in completed }
+
+    /** The first topic not finished yet. */
+    val currentTopicId get() = route.firstOrNull { it.topicId !in completed }?.topicId
+
+    val plan: List<PlanDay> get() = buildPlan()
+    val firstSession: Session get() = plan.firstOrNull()?.sessions?.firstOrNull() ?: Session(SessionKind.REVIEW, topics.first().id, "Keep it fresh", profile.minutesPerDay)
+    val upcoming: List<Pair<String, Session>> get() = plan.flatMap { d -> d.sessions.map { d.label to it } }.drop(1).take(3)
+
+    private fun buildPlan(): List<PlanDay> {
+        val todo = route.filter { it.topicId !in completed }.ifEmpty { route }
+        val sessions = todo.flatMap { step ->
+            when (levelOf(step.topicId)) {
+                SkillLevel.SHAKY -> listOf(SessionKind.PRACTICE to step.why, SessionKind.QUIZ to "Checks the practice worked")
+                SkillLevel.NEW -> listOf(SessionKind.LEARN to step.why, SessionKind.QUIZ to "Checks what you just learned")
+                SkillLevel.STRONG -> listOf(SessionKind.REVIEW to "You know this; a short review keeps it fresh")
+            }.map { (k, why) -> Session(k, step.topicId, why, 0) }
+        }
+        val today = LocalDate.now()
+        return sessions.chunked(2).take(7).mapIndexed { i, chunk ->
+            val each = profile.minutesPerDay / chunk.size
+            val label = when (i) {
+                0 -> "Today"
+                1 -> "Tomorrow"
+                else -> today.plusDays(i.toLong()).dayOfWeek.getDisplayName(TextStyle.FULL, Locale.ENGLISH)
+            }
+            PlanDay(label, chunk.map { it.copy(minutes = each) })
+        }
+    }
+
+    /** Opens a session: quizzes go straight to the quiz, the rest start with a lesson. */
+    fun openSession(s: Session) = if (s.kind == SessionKind.QUIZ) startQuiz(s.topicId) else startLesson(s)
+
+    // ---------- lessons ----------
+    fun startLesson(s: Session) {
+        lessonJob?.cancel()
+        lessonSession = s; lessonText = ""; lessonFailed = false; lessonLoading = true
+        screen = Screen.LESSON
+        lessonJob = viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val text = Advisor.lesson(ctx, profile, s.topicId, s.kind) { lessonText = it }
+            lessonLoading = false
+            if (text.isNullOrBlank()) lessonFailed = true else lessonText = text
+        }
+    }
+
+    /** Done with the lesson: logs the time; a review finishes the topic, other lessons lead to the quiz. */
+    fun finishLesson(thenQuiz: Boolean) {
+        val s = lessonSession ?: return
+        viewModelScope.launch { addStudy(minutes = s.minutes.coerceAtLeast(5), sessions = 1) }
+        if (s.kind == SessionKind.REVIEW) {
+            completed = completed + s.topicId
+            levels = levels + (s.topicId to SkillLevel.STRONG)
+            saveSkillsNow()
+            updateProfile { copy(planNote = "Reviewed ${Content_topic(s.topicId)}. It’s marked done on your pathway.") }
+        }
+        if (thenQuiz) startQuiz(s.topicId) else screen = Screen.HOME
+    }
+
+    private fun Content_topic(id: String) = Courses.topic(id).name
+
+    // ---------- adaptive quiz ----------
+    val quizQuestion: QuizQuestion? get() = quizQs.getOrNull(quizIndex)
+    val quizQuestionByLlama get() = quizFromLlama.getOrNull(quizIndex) == true
+    val quizDifficulty get() = difficultyFor(quizCorrect, quizIndex).first
+
+    /** Label shown to the learner, and the instruction given to Llama. */
+    private fun difficultyFor(correct: Int, index: Int): Pair<String, String> = when {
+        index == 0 -> "Warm-up" to "easy, check the basic idea"
+        correct >= index -> "Getting harder" to "harder, needs applying the idea to a small example"
+        correct == 0 -> "Easier" to "easy, a simple definition question"
+        else -> "Medium" to "medium"
+    }
+
+    /** Writes question [index] with Llama, or takes one from the built-in bank if that fails. */
+    private fun fetchQuestion(index: Int, correctSoFar: Int): Deferred<Pair<QuizQuestion, Boolean>> = viewModelScope.async {
+        val topic = quizTopic
+        val avoid = quizQs.map { it.text }
+        val llama = Advisor.question(getApplication(), topic, difficultyFor(correctSoFar, index).second, profile, avoid)
+        if (llama != null) llama to true
+        else {
+            val bank = Courses.courseOf(topic).bank[topic].orEmpty()
+            val fromBank = bank.firstOrNull { it.text !in avoid }
+            (fromBank ?: QuizQuestion(
+                "Llama isn’t available, and this course has no built-in question for “${Courses.topic(topic).name}”. Load a model in Settings, then try again.",
+                listOf("OK", "Go back", "Later", "Skip"), 0, "Questions for your own courses are written by Llama on the phone.",
+            )) to false
+        }
+    }
+
+    fun startQuiz(topicId: String = firstSession.topicId) {
+        quizJob?.cancel(); nextQuestion?.cancel()
+        quizTopic = topicId; quizIndex = 0; quizPicked = null; quizChecked = false; quizCorrect = 0
+        quizQs.clear(); quizFromLlama.clear()
+        screen = Screen.QUIZ
+        showQuestion(fetchQuestion(0, 0))
+    }
+
+    private fun showQuestion(pending: Deferred<Pair<QuizQuestion, Boolean>>) {
+        quizLoading = true
+        quizJob = viewModelScope.launch {
+            val (q, byLlama) = pending.await()
+            quizQs.add(q); quizFromLlama.add(byLlama)
+            quizLoading = false
+        }
+    }
+
+    fun pickQuiz(i: Int) { if (!quizChecked && !quizLoading) quizPicked = i }
+
+    fun checkQuiz() {
+        val p = quizPicked ?: return
+        val q = quizQuestion ?: return
+        if (quizChecked) return
+        quizChecked = true
+        if (p == q.answer) quizCorrect++
+        // Start writing the next question now, while the learner reads the feedback.
+        if (quizIndex + 1 < quizTotal) nextQuestion = fetchQuestion(quizIndex + 1, quizCorrect)
+    }
+
+    fun nextQuiz() {
+        if (quizIndex + 1 < quizTotal) {
+            quizIndex++; quizPicked = null; quizChecked = false
+            showQuestion(nextQuestion ?: fetchQuestion(quizIndex, quizCorrect))
+            nextQuestion = null
+            return
+        }
+        finishQuiz()
+    }
+
+    /** Adapts the pathway: a pass finishes the topic and the next one comes first; otherwise more practice. */
+    private fun finishQuiz() {
+        val id = quizTopic
+        val total = quizTotal
+        val before = levelOf(id)
+        val name = Courses.topic(id).name
+        val note: String
+        if (quizCorrect >= 2) {
+            levels = levels + (id to SkillLevel.STRONG)
+            completed = completed + id
+            val next = currentTopicId
+            note = "AdSo marked $name done because you scored $quizCorrect of $total" +
+                (if (before != SkillLevel.STRONG) " (it was “${before.label}”)" else "") + ". " +
+                (next?.let { "${Courses.topic(it).name} now comes first." } ?: "You finished every topic in ${course.title}!")
+        } else {
+            if (before == SkillLevel.STRONG) levels = levels + (id to SkillLevel.SHAKY)
+            note = "AdSo kept $name on your pathway and added more practice, because you scored $quizCorrect of $total."
+        }
+        lastResult = QuizResult(id, quizCorrect, total, levelOf(id), note)
+        updateProfile { copy(planNote = note) }
+        saveSkillsNow()
+        val correct = quizCorrect
+        viewModelScope.launch { addStudy(minutes = total * 2, sessions = 1, answered = total, correct = correct) }
+        screen = Screen.RESULT
+    }
+
+    // ---------- chat with Llama ----------
+    val chatOrbThinking get() = chatBusy && chatStreaming.isNullOrEmpty()
+
+    fun openChat(question: String? = null) {
+        screen = Screen.CHAT
+        if (question != null) { newChat(); sendChat(question) }
+    }
+
+    fun newChat() {
+        if (chatBusy) stopChat()
+        chatId = null; chatMessages.clear(); chatStreaming = null
+    }
+
+    fun openChatHistory(id: Long) {
+        if (chatBusy) stopChat()
+        viewModelScope.launch {
+            chatId = id
+            chatMessages.clear()
+            chatMessages.addAll(dao.messages(id).map { ChatMsg(it.mine, it.text, it.meta) })
+        }
+    }
+
+    fun deleteChat(id: Long) = viewModelScope.launch {
+        dao.deleteMessages(id); dao.deleteChat(id)
+        if (chatId == id) newChat()
+        chats = dao.chats()
+    }
+
+    fun sendChat(raw: String) {
+        val text = raw.trim()
+        if (text.isEmpty() || chatBusy) return
+        chatMessages.add(ChatMsg(true, text))
+        chatBusy = true; chatStreaming = ""
+        chatJob = viewModelScope.launch {
+            val id = chatId ?: dao.insertChat(ChatEntity(title = text.take(40), updated = System.currentTimeMillis())).also { chatId = it }
+            dao.insertMessage(ChatMessageEntity(chatId = id, mine = true, text = text, time = System.currentTimeMillis()))
+            val ctx = getApplication<Application>()
+            val turns = chatMessages.map { LlamaEngine.Turn(it.mine, it.text) }
+            val system = Advisor.chatSystem(profile, course, topics.associate { it.id to levelOf(it.id) })
+            val start = System.currentTimeMillis()
+            val reply = LlamaEngine.chat(ctx, system, turns, 420) { chatStreaming = it }
+            val answer = reply?.ifBlank { null } ?: chatStreaming?.ifBlank { null }
+                ?: (LlamaEngine.lastError?.let { "I couldn’t answer: $it" } ?: "I couldn’t answer that. Check that a model is loaded in Settings.")
+            val meta = listOfNotNull(
+                LlamaEngine.modelName?.substringBefore("-Instruct")?.replace("-", " "),
+                LlamaEngine.lastTokensPerSecond?.let { "%.1f tokens/s".format(it) },
+                "${(System.currentTimeMillis() - start) / 1000}s",
+            ).joinToString(" · ")
+            chatMessages.add(ChatMsg(false, answer, meta))
+            chatStreaming = null; chatBusy = false
+            dao.insertMessage(ChatMessageEntity(chatId = id, mine = false, text = answer, meta = meta, time = System.currentTimeMillis()))
+            dao.touchChat(id, System.currentTimeMillis())
+            chats = dao.chats()
+        }
+    }
+
+    fun stopChat() { LlamaEngine.stop() }
+
+    /** Suggested questions for an empty chat, from the learner's current topic. */
+    val chatSuggestions: List<String>
+        get() {
+            val t = currentTopicId?.let { Courses.topic(it).name } ?: topics.first().name
+            return listOf("Explain $t like I’m new to it", "Give me a practice question on $t", "How should I study for: ${profile.goalText.ifBlank { profile.goalType }}?")
+        }
+
+    // ---------- progress ----------
+    private suspend fun addStudy(minutes: Int, sessions: Int, answered: Int = 0, correct: Int = 0) {
+        val today = LocalDate.now().format(iso)
+        saveLock.withLock {
+            val cur = dao.log(today) ?: DayLogEntity(today)
+            dao.saveLog(cur.copy(minutes = cur.minutes + minutes, sessions = cur.sessions + sessions, answered = cur.answered + answered, correct = cur.correct + correct))
+        }
+        refreshProgress()
+    }
+
+    private suspend fun refreshProgress() {
+        val today = LocalDate.now()
+        val from = today.minusDays(6)
+        val logs = dao.logsSince(from.format(iso)).associateBy { it.date }
+        week = (0..6).map { i ->
+            val d = from.plusDays(i.toLong())
+            d.dayOfWeek.getDisplayName(TextStyle.SHORT, Locale.ENGLISH) to (logs[d.format(iso)]?.minutes ?: 0)
+        }
+        weekSessions = logs.values.sumOf { it.sessions }
+        val answered = dao.totalAnswered()
+        accuracy = if (answered > 0) (dao.totalCorrect() * 100 / answered) else null
+    }
+
+    /** Adds a clearly-labelled sample week so the graph has something to show in a demo. */
+    fun addSampleWeek() = viewModelScope.launch {
+        val today = LocalDate.now()
+        val sample = listOf(20, 35, 15, 30, 25, 40)
+        saveLock.withLock {
+            dao.saveLogs(sample.mapIndexed { i, m ->
+                DayLogEntity(today.minusDays((6 - i).toLong()).format(iso), minutes = m, sessions = 2, answered = 6, correct = 4 + (i % 3))
+            })
+        }
+        refreshProgress()
+    }
+}

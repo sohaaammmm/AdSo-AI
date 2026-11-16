@@ -78,12 +78,17 @@ class MainActivity : ComponentActivity() {
                     val viewModel: ChatViewModel = viewModel()
                     chatViewModel = viewModel
 
+                    // A question typed on AdSo's Home arrives here, ready to send.
+                    androidx.compose.runtime.LaunchedEffect(Unit) {
+                        intent.getStringExtra(EXTRA_PROMPT)?.let {
+                            viewModel.inputText = it
+                            intent.removeExtra(EXTRA_PROMPT)
+                        }
+                    }
+
                     ChatScreen(
                         viewModel = viewModel,
-                        onBackClick = {
-                            startActivity(Intent(this@MainActivity, WelcomeActivity::class.java))
-                            finish()
-                        },
+                        onBackClick = { finish() },
                         onLogsClick = {
                             startActivity(Intent(this@MainActivity, LogsActivity::class.java))
                         },
@@ -188,5 +193,8 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val MAX_NUM_OF_IMAGES = 5
+
+        /** A question typed on AdSo's Home, pre-filled in the chat box. */
+        const val EXTRA_PROMPT = "adso_prompt"
     }
 }

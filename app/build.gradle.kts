@@ -10,6 +10,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.ksp)
 }
 
 // Model files configuration for instrumentation tests
@@ -213,7 +214,7 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.executorchllamademo"
+        applicationId = "com.example.adsoai"
         testApplicationId = "com.example.executorchllamademo.test"
         minSdk = 28
         targetSdk = 35
@@ -293,6 +294,9 @@ dependencies {
     }
     implementation("androidx.activity:activity:1.9.0")
     implementation("org.json:json:20250107")
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

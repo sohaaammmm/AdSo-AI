@@ -56,8 +56,12 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.foundation.layout.height
 import com.example.executorchllamademo.ui.components.ChatInput
+import com.example.executorchllamademo.ui.components.EnergyOrb
 import com.example.executorchllamademo.ui.components.MessageItem
+import com.example.executorchllamademo.ui.components.OrbState
 import com.example.executorchllamademo.ui.theme.LocalAppColors
 import com.example.executorchllamademo.ui.viewmodel.ChatViewModel
 import kotlinx.coroutines.delay
@@ -114,6 +118,24 @@ fun ChatScreen(
             }
         }
     }
+
+    // AdSo's orb follows the model: thinking until the first token, generating while text
+    // streams, then resting, which fades back to idle on its own.
+    val replyStarted = viewModel.messages.lastOrNull()?.let { !it.isSent && it.text.isNotEmpty() } ?: false
+    var orbState by remember { mutableStateOf(OrbState.IDLE) }
+    LaunchedEffect(viewModel.isGenerating, replyStarted) {
+        orbState = when {
+            viewModel.isGenerating && !replyStarted -> OrbState.THINKING
+            viewModel.isGenerating -> OrbState.GENERATING
+            orbState == OrbState.THINKING || orbState == OrbState.GENERATING -> OrbState.RESTING
+            else -> orbState
+        }
+    }
+    // Big while the chat is empty, smaller once there are messages.
+    val orbSize by animateDpAsState(
+        targetValue = if (viewModel.messages.isEmpty()) 260.dp else 112.dp,
+        label = "orbSize"
+    )
 
     // Periodically update memory usage
     LaunchedEffect(Unit) {
@@ -204,6 +226,15 @@ fun ChatScreen(
                     detectTapGestures(onTap = { focusManager.clearFocus() })
                 }
         ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(orbSize),
+                contentAlignment = Alignment.Center
+            ) {
+                EnergyOrb(state = orbState, modifier = Modifier.size(orbSize))
+            }
+
             // Messages list with scroll-to-bottom FAB overlay
             Box(
                 modifier = Modifier

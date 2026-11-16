@@ -1,0 +1,24 @@
+{
+  "name": "adso-energy-orb",
+  "private": true,
+  "version": "1.0.0",
+  "description": "AdSo's animated 3D energy orb (React Three Fiber). Built into app/src/main/assets/orb/orb.js for the Android WebView.",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:mount": "node -e \"process.env.ORB_ENTRY='mount'; import('vite').then(v => v.build())\""
+  },
+  "dependencies": {
+    "@react-three/drei": "9.114.0",
+    "@react-three/fiber": "8.17.10",
+    "@react-three/postprocessing": "2.16.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "three": "0.169.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "4.3.3",
+    "vite": "5.4.10"
+  }
+}

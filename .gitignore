@@ -10,3 +10,11 @@
 local.properties
 *.so
 *.aar
+
+# raw demo screen recordings (large)
+docs/demo/*.mp4
+
+# local JVM crash logs and Kotlin cache
+hs_err_pid*.log
+replay_pid*.log
+.kotlin/
