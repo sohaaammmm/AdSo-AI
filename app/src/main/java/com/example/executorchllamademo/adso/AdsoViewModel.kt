@@ -13,6 +13,7 @@ import com.example.executorchllamademo.adso.data.ChatEntity
 import com.example.executorchllamademo.adso.data.ChatMessageEntity
 import com.example.executorchllamademo.adso.data.CheckQuestion
 import com.example.executorchllamademo.adso.data.Course
+import com.example.executorchllamademo.adso.data.Content
 import com.example.executorchllamademo.adso.data.CourseEntity
 import com.example.executorchllamademo.adso.data.Courses
 import com.example.executorchllamademo.adso.data.DayLogEntity
@@ -25,6 +26,7 @@ import com.example.executorchllamademo.adso.llm.Advisor
 import com.example.executorchllamademo.adso.llm.LlamaEngine
 import com.example.executorchllamademo.adso.llm.PathStep
 import com.example.executorchllamademo.adso.llm.Pathway
+import com.example.executorchllamademo.adso.llm.shortModelName
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
@@ -91,6 +93,13 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
     private val quizQs = mutableStateListOf<QuizQuestion>()
     private val quizFromLlama = mutableStateListOf<Boolean>()
     var quizLoading by mutableStateOf(false); private set
+    private val quizMissed = mutableListOf<String>()
+
+    // Llama's advice after a quiz (it can also move the next topic to the front of the pathway)
+    var coachAdvice by mutableStateOf<String?>(null); private set
+    var coachBusy by mutableStateOf(false); private set
+    var coachMoved by mutableStateOf<String?>(null); private set
+    private var coachJob: Job? = null
     private var nextQuestion: Deferred<Pair<QuizQuestion, Boolean>>? = null
     private var quizJob: Job? = null
     val quizTotal = 3
@@ -130,13 +139,15 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
             val p = saved.mapNotNull { e -> Pathway.fromJson(e.pathwayJson)?.let { e.id to it } }.toMap().toMutableMap()
             if ("ds" !in p) Pathway.fromJson(profile.pathwayJson)?.let { p["ds"] = it } // older installs
             pathways = p
-            addedCourses = (listOf("ds") + saved.map { it.id }).distinct()
+            addedCourses = ((if (prefs.getBoolean(KEY_DS_REMOVED, false)) emptyList() else listOf("ds")) + saved.map { it.id }).distinct().ifEmpty { listOf("ds") }
             course = Courses.get(profile.activeCourse)
             loadSkills()
             refreshProgress()
             chats = dao.chats()
             screen = if (profile.onboarded) Screen.HOME else Screen.WELCOME
             ready = true
+            // Load the model in the background so it's ready before the learner needs it.
+            launch { if (LlamaEngine.ensureLoaded(getApplication())) fixOldCourseNames() }
         }
     }
 
@@ -205,10 +216,10 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
 
     fun deadlineLabel(): String {
         if (profile.deadlineDays <= 0) return "no fixed date"
-        return LocalDate.now().plusDays(profile.deadlineDays.toLong()).format(DateTimeFormatter.ofPattern("d MMM", Locale.ENGLISH))
+        return LocalDate.now().plusDays(profile.deadlineDays.toLong()).format(DateTimeFormatter.ofPattern(if (profile.deadlineDays > 180) "d MMM yyyy" else "d MMM", Locale.ENGLISH))
     }
 
-    fun saveGoalsAndReplan() = buildPlanAnimated("Updating your plan…", "Re-fitted to ${profile.minutesPerDay} minutes a day until ${deadlineLabel()}.")
+    fun saveGoalsAndReplan() = buildPlanAnimated("Updating your plan…", "Re-fitted to ${Content.minutesLabel(profile.minutesPerDay)} a day until ${deadlineLabel()}.")
 
     // ---------- courses ----------
     fun switchCourse(id: String) {
@@ -217,8 +228,54 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
         screen = if (hasSkillCheck) Screen.HOME else Screen.COURSES
     }
 
+    private val prefs get() = getApplication<Application>().getSharedPreferences("adso", 0)
+
+    /** Removes a course with its skill check, progress and pathway. At least one course always stays. */
+    fun deleteCourse(id: String) {
+        if (addedCourses.size <= 1 || id !in addedCourses) return
+        val ids = Courses.get(id).topics.map { it.id }
+        addedCourses = addedCourses - id
+        pathways = pathways - id
+        levels = levels - ids.toSet(); baseLevels = baseLevels - ids.toSet(); completed = completed - ids.toSet()
+        if (id == "ds") prefs.edit().putBoolean(KEY_DS_REMOVED, true).apply()
+        viewModelScope.launch { saveLock.withLock { dao.deleteCourse(id); dao.deleteSkills(ids) } }
+        if (course.id == id) {
+            course = Courses.get(addedCourses.first())
+            updateProfile { copy(activeCourse = course.id) }
+        }
+    }
+
+    /** Once per course: corrects the name of courses made before names were checked (e.g. "Tf antenna" -> "RF Antenna"). */
+    private suspend fun fixOldCourseNames() {
+        val ctx = getApplication<Application>()
+        for (e in dao.courses().filter { it.custom && !prefs.getBoolean("named3_" + it.id, false) }) {
+            val fixed = Advisor.fixTitle(ctx, e.title)
+            prefs.edit().putBoolean("named3_" + e.id, true).apply()
+            if (fixed == e.title) continue
+            val c = Courses.get(e.id).copy(title = fixed)
+            Courses.register(c)
+            saveLock.withLock { dao.saveCourse(e.copy(title = fixed)) }
+            if (course.id == c.id) course = c
+        }
+    }
+
+    /** The learner renames a course (e.g. when autocorrect guessed wrong). Their name always wins. */
+    fun renameCourse(id: String, title: String) {
+        val t = Advisor.tidyTitle(title).take(40)
+        if (t.isBlank()) return
+        val c = Courses.get(id).copy(title = t)
+        Courses.register(c)
+        prefs.edit().putBoolean("named3_" + id, true).apply()
+        if (course.id == id) course = c
+        addedCourses = addedCourses.toMutableList() // new list instance so the Courses screen redraws
+        viewModelScope.launch {
+            saveLock.withLock { dao.saveCourse((dao.courses().firstOrNull { it.id == id } ?: CourseEntity(id, t)).copy(title = t)) }
+        }
+    }
+
     /** Adds a built-in course and starts its skill check. */
     fun addCourse(id: String) {
+        if (id == "ds") prefs.edit().putBoolean(KEY_DS_REMOVED, false).apply()
         addedCourses = (addedCourses + id).distinct()
         viewModelScope.launch { saveLock.withLock { dao.saveCourse(CourseEntity(id, Courses.get(id).title)) } }
         course = Courses.get(id)
@@ -232,7 +289,7 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
         newCourseBusy = true; newCourseError = null; newCourseProgress = 0
         viewModelScope.launch {
             val ctx = getApplication<Application>()
-            val c = if (LlamaEngine.ensureLoaded(ctx)) Advisor.newCourse(ctx, profile, name) { newCourseProgress = it } else null
+            val c = if (LlamaEngine.ensureLoaded(ctx)) Advisor.newCourse(ctx, profile, Advisor.fixTitle(ctx, name)) { newCourseProgress = it } else null
             newCourseBusy = false
             if (c == null) {
                 newCourseError = if (LlamaEngine.status == LlamaEngine.Status.MISSING) "No model on this phone, so AdSo can't design a course. Pick one of the built-in courses."
@@ -273,7 +330,7 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
         baseLevels = baseLevels + found
         completed = completed - found.keys // a fresh check restarts this course's pathway
         saveSkillsNow()
-        viewModelScope.launch { addStudy(minutes = 3, sessions = 1) }
+        viewModelScope.launch { addStudy(minutes = 0, sessions = 1) }
         screen = Screen.GAPS
     }
 
@@ -281,34 +338,63 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
 
     fun makePlan() = buildPlanAnimated("Building your plan…", "")
 
-    /** Asks Llama for the pathway (falls back to rules), saves it, then opens the plan. */
+    /** True while Llama is personalising the pathway in the background (shown as a small tag). */
+    var personalising by mutableStateOf(false); private set
+    private var personaliseJob: Job? = null
+
+    /**
+     * Shows the plan straight away (built from the skill check), then lets Llama personalise the
+     * pathway in the background. The learner never waits for the model.
+     */
     private fun buildPlanAnimated(title: String, note: String) {
         generatingTitle = title
-        generatingDetail = "Loading Llama on this phone…"
+        generatingDetail = "Ordering your topics…"
         screen = Screen.GENERATING
         planTabRoute = false
         val c = course
+        val lv = c.topics.associate { it.id to levelOf(it.id) }
         viewModelScope.launch {
-            val ctx = getApplication<Application>()
-            val loaded = LlamaEngine.ensureLoaded(ctx)
-            generatingDetail = if (loaded) "${LlamaEngine.modelName?.substringBefore("-Instruct") ?: "Llama"} is ordering your topics…"
-            else "Model not available, using AdSo’s built-in rules…"
-            val start = System.currentTimeMillis()
-            val lv = c.topics.associate { it.id to levelOf(it.id) }
-            val pw = if (loaded) Advisor.pathway(ctx, profile, c, lv, deadlineLabel()) else Advisor.rulesPathway(c, lv)
-            pathways = pathways + (c.id to pw)
-            val secs = (System.currentTimeMillis() - start) / 1000
-            val fullNote = listOfNotNull(
-                note.ifBlank { null },
-                if (pw.byLlama) "Pathway written by Llama on this phone in ${secs}s." else "Pathway from AdSo’s rules (Llama wasn’t available or its answer couldn’t be used).",
-                pw.summary.ifBlank { null },
-            ).joinToString(" ")
-            val existing = dao.courses().firstOrNull { it.id == c.id }
-            saveLock.withLock { dao.saveCourse((existing ?: CourseEntity(c.id, c.title)).copy(pathwayJson = pw.toJson())) }
+            val quick = Advisor.rulesPathway(c, lv)
+            savePathway(c, quick)
             addedCourses = (addedCourses + c.id).distinct()
-            updateProfile { copy(onboarded = true, planNote = fullNote) }
+            updateProfile { copy(onboarded = true, planNote = listOfNotNull(note.ifBlank { null }, "Your gaps come first. Llama is now personalising the pathway for your goal.").joinToString(" ")) }
+            kotlinx.coroutines.delay(900) // let the orb screen show briefly
             screen = Screen.PLAN
+            personalise(c, lv, note)
         }
+    }
+
+    /** Background step: Llama orders the topics and writes reasons; replaces the quick pathway if usable. */
+    /** The learner wants Llama now (chat, lesson, quiz): stop the background pathway so they don't wait. The quick plan stays. */
+    private fun yieldBackgroundLlama() {
+        if (coachBusy) { coachJob?.cancel(); LlamaEngine.stop(); coachBusy = false }
+        if (!personalising) return
+        personaliseJob?.cancel(); LlamaEngine.stop(); personalising = false
+        updateProfile { copy(planNote = "Your gaps come first. Tap Rebuild plan any time to let Llama personalise it.") }
+    }
+
+    private fun personalise(c: Course, lv: Map<String, SkillLevel>, note: String) {
+        personaliseJob?.cancel()
+        personaliseJob = viewModelScope.launch {
+            personalising = true
+            val ctx = getApplication<Application>()
+            val start = System.currentTimeMillis()
+            val pw = if (LlamaEngine.ensureLoaded(ctx)) Advisor.pathway(ctx, profile, c, lv, deadlineLabel()) else null
+            personalising = false
+            val secs = (System.currentTimeMillis() - start) / 1000
+            if (pw != null && pw.byLlama) {
+                savePathway(c, pw)
+                updateProfile { copy(planNote = listOfNotNull(note.ifBlank { null }, "Llama personalised your pathway on this phone (${secs}s).", pw.summary.ifBlank { null }).joinToString(" ")) }
+            } else {
+                updateProfile { copy(planNote = listOfNotNull(note.ifBlank { null }, "Your gaps come first. (Llama couldn’t personalise it this time; tap Rebuild plan to try again.)").joinToString(" ")) }
+            }
+        }
+    }
+
+    private suspend fun savePathway(c: Course, pw: Pathway) {
+        pathways = pathways + (c.id to pw)
+        val existing = dao.courses().firstOrNull { it.id == c.id }
+        saveLock.withLock { dao.saveCourse((existing ?: CourseEntity(c.id, c.title)).copy(pathwayJson = pw.toJson())) }
     }
 
     // ---------- pathway and plan ----------
@@ -338,7 +424,9 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
             }.map { (k, why) -> Session(k, step.topicId, why, 0) }
         }
         val today = LocalDate.now()
-        return sessions.chunked(2).take(7).mapIndexed { i, chunk ->
+        // More daily time = more sessions a day (each about 45-60 min), not one very long session.
+        val perDay = (profile.minutesPerDay / 45).coerceIn(2, 6)
+        return sessions.chunked(perDay).take(7).mapIndexed { i, chunk ->
             val each = profile.minutesPerDay / chunk.size
             val label = when (i) {
                 0 -> "Today"
@@ -354,6 +442,7 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- lessons ----------
     fun startLesson(s: Session) {
+        yieldBackgroundLlama()
         lessonJob?.cancel()
         lessonSession = s; lessonText = ""; lessonFailed = false; lessonLoading = true
         screen = Screen.LESSON
@@ -368,7 +457,7 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
     /** Done with the lesson: logs the time; a review finishes the topic, other lessons lead to the quiz. */
     fun finishLesson(thenQuiz: Boolean) {
         val s = lessonSession ?: return
-        viewModelScope.launch { addStudy(minutes = s.minutes.coerceAtLeast(5), sessions = 1) }
+        viewModelScope.launch { addStudy(minutes = 0, sessions = 1) }
         if (s.kind == SessionKind.REVIEW) {
             completed = completed + s.topicId
             levels = levels + (s.topicId to SkillLevel.STRONG)
@@ -441,7 +530,9 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun startQuiz(topicId: String = firstSession.topicId) {
+        yieldBackgroundLlama()
         quizJob?.cancel(); nextQuestion?.cancel(); stopLlamaQuestions()
+        quizMissed.clear()
         quizTopic = topicId; quizIndex = 0; quizPicked = null; quizChecked = false; quizCorrect = 0
         quizQs.clear(); quizFromLlama.clear()
         screen = Screen.QUIZ
@@ -465,7 +556,7 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
         val q = quizQuestion ?: return
         if (quizChecked) return
         quizChecked = true
-        if (p == q.answer) quizCorrect++
+        if (p == q.answer) quizCorrect++ else quizMissed += q.text
     }
 
     fun nextQuiz() {
@@ -500,8 +591,38 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
         updateProfile { copy(planNote = note) }
         saveSkillsNow()
         val correct = quizCorrect
-        viewModelScope.launch { addStudy(minutes = total * 2, sessions = 1, answered = total, correct = correct) }
+        viewModelScope.launch { addStudy(minutes = 0, sessions = 1, answered = total, correct = correct) }
         screen = Screen.RESULT
+        coachAfterQuiz(id, correct, total, quizMissed.toList(), note)
+    }
+
+    private fun coachAfterQuiz(topicId: String, correct: Int, total: Int, missed: List<String>, note: String) {
+        coachJob?.cancel(); coachAdvice = null; coachMoved = null; coachBusy = true
+        val c = course
+        val lv = c.topics.associate { it.id to levelOf(it.id) }
+        val open = route.filter { it.topicId !in completed }.map { it.topicId }
+        coachJob = viewModelScope.launch {
+            val ctx = getApplication<Application>()
+            val r = if (LlamaEngine.ensureLoaded(ctx)) Advisor.coach(ctx, profile, c, topicId, correct, total, missed, open, lv, deadlineLabel()) else null
+            coachBusy = false
+            if (r == null) return@launch
+            coachAdvice = r.advice
+            var moved: String? = null
+            val next = r.nextTopicId
+            if (next != null && open.firstOrNull() != next) {
+                val pw = pathways[c.id] ?: Advisor.rulesPathway(c, lv)
+                pw.steps.firstOrNull { it.topicId == next }?.let { step ->
+                    val front = step.copy(why = r.why ?: step.why)
+                    savePathway(c, Pathway(listOf(front) + pw.steps.filter { it.topicId != next }, pw.summary, byLlama = true))
+                    moved = Courses.topic(next).name
+                }
+            }
+            coachMoved = moved
+            // The rule-based note said which topic comes first; Llama just changed that, so drop the old claim.
+            val shown = if (moved != null) note.replace(Regex(" ?[^.]* now comes first\\."), "").trim() else note
+            if (moved != null) lastResult = lastResult?.copy(note = shown)
+            updateProfile { copy(planNote = listOfNotNull(shown, "Llama:${r.advice}", moved?.let { "$it moved to the front of your pathway." }).joinToString(" ")) }
+        }
     }
 
     // ---------- chat with Llama ----------
@@ -535,6 +656,7 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
     fun sendChat(raw: String) {
         val text = raw.trim()
         if (text.isEmpty() || chatBusy) return
+        yieldBackgroundLlama()
         chatMessages.add(ChatMsg(true, text))
         chatBusy = true; chatStreaming = ""
         chatJob = viewModelScope.launch {
@@ -544,11 +666,11 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
             val turns = chatMessages.map { LlamaEngine.Turn(it.mine, it.text) }
             val system = Advisor.chatSystem(profile, course, topics.associate { it.id to levelOf(it.id) })
             val start = System.currentTimeMillis()
-            val reply = LlamaEngine.chat(ctx, system, turns, 420) { chatStreaming = it }
+            val reply = LlamaEngine.chat(ctx, system, turns, Advisor.chatBudget(text)) { chatStreaming = Advisor.plain(it) }?.let(Advisor::plain)
             val answer = reply?.ifBlank { null } ?: chatStreaming?.ifBlank { null }
                 ?: (LlamaEngine.lastError?.let { "I couldn’t answer: $it" } ?: "I couldn’t answer that. Check that a model is loaded in Settings.")
             val meta = listOfNotNull(
-                LlamaEngine.modelName?.substringBefore("-Instruct")?.replace("-", " "),
+                LlamaEngine.modelName?.let(::shortModelName),
                 LlamaEngine.lastTokensPerSecond?.let { "%.1f tokens/s".format(it) },
                 "${(System.currentTimeMillis() - start) / 1000}s",
             ).joinToString(" · ")
@@ -592,15 +714,20 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
         accuracy = if (answered > 0) (dao.totalCorrect() * 100 / answered) else null
     }
 
-    /** Adds a clearly-labelled sample week so the graph has something to show in a demo. */
-    fun addSampleWeek() = viewModelScope.launch {
-        val today = LocalDate.now()
-        val sample = listOf(20, 35, 15, 30, 25, 40)
-        saveLock.withLock {
-            dao.saveLogs(sample.mapIndexed { i, m ->
-                DayLogEntity(today.minusDays((6 - i).toLong()).format(iso), minutes = m, sessions = 2, answered = 6, correct = 4 + (i % 3))
-            })
+    // Real study time: counted while AdSo is open on screen, saved minute by minute, so the graph moves as you use the app.
+    private var trackJob: Job? = null
+    private var pendingSeconds = 0
+    fun appVisible(visible: Boolean) {
+        trackJob?.cancel()
+        if (!visible) return
+        trackJob = viewModelScope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(10_000)
+                pendingSeconds += 10
+                if (pendingSeconds >= 60) { pendingSeconds -= 60; addStudy(minutes = 1, sessions = 0) }
+            }
         }
-        refreshProgress()
     }
+
+    private companion object { const val KEY_DS_REMOVED = "ds_removed" }
 }

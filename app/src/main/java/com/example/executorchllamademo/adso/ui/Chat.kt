@@ -1,4 +1,4 @@
-package com.example.executorchllamademo.adso.ui
+﻿package com.example.executorchllamademo.adso.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -71,6 +71,7 @@ import androidx.compose.ui.unit.sp
 import com.example.executorchllamademo.adso.AdsoViewModel
 import com.example.executorchllamademo.adso.ChatMsg
 import com.example.executorchllamademo.adso.llm.LlamaEngine
+import com.example.executorchllamademo.adso.llm.shortModelName
 import com.example.executorchllamademo.ui.components.OrbState
 import com.example.executorchllamademo.ui.theme.AdsoTheme
 import java.text.DateFormat
@@ -110,7 +111,7 @@ fun ChatScreen(vm: AdsoViewModel) {
 
     Box(Modifier.fillMaxSize().background(m.bg)) {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
-            // Header: back · model · history · new chat
+            // Header: back Â· model Â· history Â· new chat
             Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 MonoIcon(m, Icons.AutoMirrored.Rounded.ArrowBack, tr("Back")) { vm.back() }
                 Column(
@@ -118,10 +119,10 @@ fun ChatScreen(vm: AdsoViewModel) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(LlamaEngine.modelName?.substringBefore("-Instruct")?.replace("-", " ") ?: "Llama 3.2", color = m.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text(LlamaEngine.modelName?.let(::shortModelName) ?: "Llama 3.2", color = m.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                         Icon(Icons.Rounded.KeyboardArrowDown, null, tint = m.muted, modifier = Modifier.size(18.dp))
                     }
-                    Text("On this phone · offline", color = m.muted, fontSize = 12.sp)
+                    Text("On this phone Â· offline", color = m.muted, fontSize = 12.sp)
                 }
                 MonoIcon(m, Icons.Rounded.History, tr("Chats")) { showHistory = true }
                 Spacer(Modifier.width(6.dp))
@@ -155,7 +156,7 @@ fun ChatScreen(vm: AdsoViewModel) {
                 ) {
                     items(vm.chatMessages) { msg -> Bubble(m, msg) }
                     vm.chatStreaming?.let { live ->
-                        item { Bubble(m, ChatMsg(false, if (live.isEmpty()) "Thinking…" else "$live ▌", ""), faded = live.isEmpty()) }
+                        item { Bubble(m, ChatMsg(false, if (live.isEmpty()) "Thinkingâ€¦" else "$live â–Œ", ""), faded = live.isEmpty()) }
                     }
                 }
             }
@@ -165,7 +166,7 @@ fun ChatScreen(vm: AdsoViewModel) {
                 OutlinedTextField(
                     value = draft, onValueChange = { draft = it },
                     modifier = Modifier.weight(1f),
-                    placeholder = { Text("${tr("Message")}…", color = m.muted) },
+                    placeholder = { Text("${tr("Message")}â€¦", color = m.muted) },
                     maxLines = 4, shape = RoundedCornerShape(26.dp),
                     keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences, imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { send() }),
@@ -229,7 +230,7 @@ fun ChatScreen(vm: AdsoViewModel) {
             ModalBottomSheet(onDismissRequest = { showModels = false }, containerColor = AdsoTheme.colors.background) {
                 Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp).verticalScroll(rememberScrollState())) {
                     Text(tr("Choose a model"), color = AdsoTheme.colors.textPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(bottom = 12.dp))
-                    ModelCard(vm, onAdvanced = { showModels = false })
+                    ModelCard(vm, onAdvanced = { showModels = false }, onLogs = { showModels = false })
                 }
             }
         }

@@ -72,6 +72,9 @@ class AdsoActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() { super.onResume(); vm.appVisible(true) }
+    override fun onPause() { vm.appVisible(false); super.onPause() }
+
     /** The original ExecuTorch model screen (advanced options). AdSo releases its model first. */
     private fun openModelSettings() = lifecycleScope.launch {
         LlamaEngine.releaseNow()

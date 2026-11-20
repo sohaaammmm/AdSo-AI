@@ -158,6 +158,7 @@ fun HomeScreen(vm: AdsoViewModel) {
         // Your learning pathway: the route, in order, with how much is actually done.
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SectionTitle(tr("Your learning pathway"), action = "Open", onAction = { vm.planTabRoute = true; vm.go(Screen.PLAN) })
+            if (vm.personalising) Tag(tr("Llama is personalising your pathway…"), c.info, c.infoTile)
             GlassCard {
                 val done = vm.pathwayDone
                 val total = vm.topics.size
@@ -183,6 +184,29 @@ fun HomeScreen(vm: AdsoViewModel) {
             }
         }
 
+        // For your interests: each topic you picked turns the current topic into a real example and an exercise, by Llama.
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            SectionTitle(tr("For your interests"), action = "Edit", onAction = { vm.go(Screen.EDIT_GOALS) })
+            val topicName = Content.topic(focus.topicId).name
+            val picked = vm.interestSet.toList().take(4)
+            if (picked.isEmpty()) {
+                GlassCard(onClick = { vm.go(Screen.EDIT_GOALS) }) {
+                    Text("Pick topics you like (robotics, music, finance…) and AdSo shows how $topicName is used there.", color = c.textSecondary, fontSize = 14.sp, lineHeight = 20.sp)
+                }
+            }
+            picked.forEach { interest ->
+                GlassCard(onClick = { vm.openChat("Show me how $topicName is used in $interest: one real example, then a short exercise for me to try.") }, padding = 14.dp) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        IconTile(Icons.Rounded.AutoAwesome, c.info, c.infoTile)
+                        Column(Modifier.weight(1f)) {
+                            Text("$topicName in $interest", color = c.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                            Text("A real example and a small exercise, written by Llama", color = c.textSecondary, fontSize = 13.sp)
+                        }
+                    }
+                }
+            }
+        }
+
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             SectionTitle(tr("Coming up"), action = "See plan", onAction = { vm.planTabRoute = false; vm.go(Screen.PLAN) })
             vm.upcoming.forEach { (day, s) -> SessionRow(day, s, onStart = { vm.openSession(s) }) }
@@ -198,12 +222,12 @@ fun PlanScreen(vm: AdsoViewModel) {
     ScrollPage(Modifier.statusBarsPadding()) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Eyebrow("${tr("Study plan")} · ${vm.course.title}")
+                Eyebrow(tr("Study plan"))
                 Spacer(Modifier.weight(1f))
                 CircleIconButton(Icons.Rounded.SwapHoriz, "Switch course", { vm.go(Screen.COURSES) }, size = 36.dp)
             }
-            Text(p.goalText.ifBlank { p.goalType }, style = MaterialTheme.typography.headlineMedium, color = c.textPrimary)
-            Text("${p.goalType} · ${p.minutesPerDay} min a day · until ${vm.deadlineLabel()}", color = c.textSecondary, fontSize = 14.sp)
+            Text(vm.course.title, style = MaterialTheme.typography.headlineMedium, color = c.textPrimary)
+            Text("${p.goalType} · ${Content.minutesLabel(p.minutesPerDay)} a day · until ${vm.deadlineLabel()}", color = c.textSecondary, fontSize = 14.sp)
         }
         if (p.planNote.isNotBlank()) {
             GlassCard(outline = c.info, fill = c.infoTile, padding = 14.dp) {
@@ -212,6 +236,7 @@ fun PlanScreen(vm: AdsoViewModel) {
                     Column {
                         Text(tr("Plan updated"), color = c.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
                         Text(p.planNote, color = c.textPrimary, fontSize = 13.sp, lineHeight = 19.sp)
+                        if (vm.personalising) { Tag(tr("Llama is personalising your pathway…"), c.info, c.card) }
                     }
                 }
             }
@@ -231,7 +256,7 @@ fun PlanScreen(vm: AdsoViewModel) {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Row {
                         Text(day.label, color = if (di == 0) c.info else c.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                        Text("${day.totalMinutes} min", color = c.textSecondary, fontSize = 12.sp)
+                        Text(Content.minutesLabel(day.totalMinutes), color = c.textSecondary, fontSize = 12.sp)
                     }
                     day.sessions.forEachIndexed { si, s ->
                         SessionRow(null, s, highlight = di == 0 && si == 0, onStart = { vm.openSession(s) })
@@ -402,6 +427,23 @@ fun ResultScreen(vm: AdsoViewModel) {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     Icon(Icons.Rounded.AutoAwesome, null, tint = c.info, modifier = Modifier.size(20.dp))
                     Text(r.note, color = c.textPrimary, fontSize = 14.sp, lineHeight = 20.sp)
+                }
+            }
+            // Llama reviews the quiz: advice from the mistakes and the goal, and it may re-order the pathway.
+            if (vm.coachBusy) {
+                GlassCard(padding = 14.dp) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Orb(OrbState.THINKING, 40.dp)
+                        Text("Llama is reviewing your answers…", color = c.textSecondary, fontSize = 14.sp)
+                    }
+                }
+            }
+            vm.coachAdvice?.let { advice ->
+                GlassCard(padding = 14.dp) {
+                    Text(tr("Llama’s advice"), color = c.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.size(4.dp))
+                    Text(advice, color = c.textPrimary, fontSize = 14.sp, lineHeight = 20.sp)
+                    vm.coachMoved?.let { Spacer(Modifier.size(8.dp)); Tag("$it moved to the front of your pathway", c.info, c.infoTile) }
                 }
             }
         }

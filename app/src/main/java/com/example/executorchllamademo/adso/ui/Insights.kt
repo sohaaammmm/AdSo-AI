@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Schedule
@@ -141,7 +143,7 @@ fun ProgressScreen(vm: AdsoViewModel) {
             }
         }
         if (vm.week.all { it.second == 0 }) {
-            Text("No study logged this week yet. Finish a lesson or quiz and it shows up here.", color = c.textSecondary, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+            Text("Your study time shows up here. AdSo counts every minute it is open on your screen.", color = c.textSecondary, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
         }
     }
 }
@@ -229,7 +231,7 @@ fun SettingsScreen(vm: AdsoViewModel, onAdvanced: () -> Unit, onLogs: () -> Unit
             Divider()
             SettingsLink("Retake skill check") { vm.startSkillCheck() }
         }
-        ModelCard(vm, onAdvanced)
+        ModelCard(vm, onAdvanced, onLogs)
         GlassCard {
             Text(tr("Appearance"), style = MaterialTheme.typography.titleMedium, color = c.textPrimary)
             Spacer(Modifier.size(10.dp))
@@ -247,17 +249,12 @@ fun SettingsScreen(vm: AdsoViewModel, onAdvanced: () -> Unit, onLogs: () -> Unit
                 Content.languages.forEach { l -> SelectChip(l.native, p.language == l.code, { vm.updateProfile { copy(language = l.code) } }, sub = if (l.aiGood) "AI: good" else "Menus only") }
             }
         }
-        GlassCard(padding = 0.dp) {
-            SettingsLink("Logs", onLogs)
-            Divider()
-            SettingsLink("Add a sample study week (for demos)") { vm.addSampleWeek() }
-        }
     }
 }
 
 /** The model on the phone: status, choice of model file, temperature, speed (numbers for the report). */
 @Composable
-fun ModelCard(vm: AdsoViewModel, onAdvanced: () -> Unit) {
+fun ModelCard(vm: AdsoViewModel, onAdvanced: () -> Unit, onLogs: () -> Unit) {
     val c = AdsoTheme.colors
     val e = LlamaEngine
     val ctx = LocalContext.current
@@ -265,15 +262,16 @@ fun ModelCard(vm: AdsoViewModel, onAdvanced: () -> Unit) {
     val models = remember { e.availableModels() }
     var chosen by remember { mutableStateOf(e.pickModel(ctx)?.first) }
     GlassCard {
-        Text(tr("Model"), style = MaterialTheme.typography.titleMedium, color = c.textPrimary)
-        Spacer(Modifier.size(10.dp))
+        var advanced by remember { mutableStateOf(false) }
+        Text(tr("AI on this phone"), style = MaterialTheme.typography.titleMedium, color = c.textPrimary)
+        Text("Already trained by Meta. It runs offline; nothing to set up.", color = c.textSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 2.dp, bottom = 6.dp))
         InfoRow("Status", when (e.status) {
-            LlamaEngine.Status.READY -> "Loaded"
+            LlamaEngine.Status.READY -> "Ready"
             LlamaEngine.Status.WORKING -> "Thinking…"
-            LlamaEngine.Status.LOADING -> "Loading…"
+            LlamaEngine.Status.LOADING -> "Getting ready…"
             LlamaEngine.Status.MISSING -> "Model file not found"
-            LlamaEngine.Status.FAILED -> "Failed to load"
-            LlamaEngine.Status.NOT_LOADED -> "Not loaded yet"
+            LlamaEngine.Status.FAILED -> "Couldn’t start"
+            LlamaEngine.Status.NOT_LOADED -> "Starts when needed"
         })
         if (models.isEmpty()) {
             Text("No model files in ${LlamaEngine.MODEL_DIR}. Copy a .pte model and tokenizer.model there.", color = c.error, fontSize = 13.sp, modifier = Modifier.padding(vertical = 6.dp))
@@ -287,12 +285,19 @@ fun ModelCard(vm: AdsoViewModel, onAdvanced: () -> Unit) {
             ) {
                 RadioButton(selected = chosen == m.path, onClick = null, colors = RadioButtonDefaults.colors(selectedColor = c.info, unselectedColor = c.textSecondary))
                 Column(Modifier.weight(1f).padding(start = 8.dp)) {
-                    Text(m.label, color = c.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("%.2f GB · %s · INT4 SpinQuant".format(m.sizeGb, if (m.is3b) "≈ 3.21 B parameters" else "≈ 1.24 B parameters"), color = c.textSecondary, fontSize = 12.sp)
+                    Text(m.title, color = c.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("%.2f GB · %s".format(m.sizeGb, m.detail), color = c.textSecondary, fontSize = 12.sp)
                 }
             }
         }
-        Spacer(Modifier.size(8.dp))
+        Row(
+            Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { advanced = !advanced },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("Advanced", color = c.textSecondary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Icon(if (advanced) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown, null, tint = c.textSecondary)
+        }
+        if (!advanced) return@GlassCard
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Temperature", color = c.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
             Text("%.2f".format(e.temperature), color = c.info, fontSize = 14.sp, fontWeight = FontWeight.Bold)
@@ -312,7 +317,9 @@ fun ModelCard(vm: AdsoViewModel, onAdvanced: () -> Unit) {
             scope.launch { if (e.status == LlamaEngine.Status.READY) e.releaseNow(); e.ensureLoaded(ctx) }
         }, Modifier.fillMaxWidth(), enabled = e.status != LlamaEngine.Status.LOADING && e.status != LlamaEngine.Status.WORKING)
         Spacer(Modifier.size(8.dp))
-        GhostButton("Advanced model settings", onAdvanced, Modifier.fillMaxWidth())
+        GhostButton("ExecuTorch model settings", onAdvanced, Modifier.fillMaxWidth())
+        Spacer(Modifier.size(4.dp))
+        SettingsLink("Logs", onLogs)
     }
 }
 

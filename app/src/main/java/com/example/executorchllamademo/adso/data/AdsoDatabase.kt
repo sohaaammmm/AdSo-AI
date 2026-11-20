@@ -123,6 +123,12 @@ interface AdsoDao {
     @Upsert
     suspend fun saveCourse(c: CourseEntity)
 
+    @Query("DELETE FROM course WHERE id = :id")
+    suspend fun deleteCourse(id: String)
+
+    @Query("DELETE FROM skill WHERE topicId IN (:ids)")
+    suspend fun deleteSkills(ids: List<String>)
+
     @Query("SELECT * FROM chat ORDER BY updated DESC")
     suspend fun chats(): List<ChatEntity>
 
@@ -147,7 +153,7 @@ interface AdsoDao {
 
 @Database(
     entities = [ProfileEntity::class, SkillEntity::class, DayLogEntity::class, CourseEntity::class, ChatEntity::class, ChatMessageEntity::class],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class AdsoDatabase : RoomDatabase() {
@@ -173,10 +179,17 @@ abstract class AdsoDatabase : RoomDatabase() {
             }
         }
 
+        /** v4: no schema change. Clears the old study log, which held a made-up demo week; time is now measured in the app. */
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("DELETE FROM day_log")
+            }
+        }
+
         @Volatile private var instance: AdsoDatabase? = null
         fun get(context: Context): AdsoDatabase = instance ?: synchronized(this) {
             instance ?: Room.databaseBuilder(context.applicationContext, AdsoDatabase::class.java, "adso.db")
-                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
                 .build().also { instance = it }
         }
     }

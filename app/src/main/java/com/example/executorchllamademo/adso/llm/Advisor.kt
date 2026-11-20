@@ -16,6 +16,9 @@ import org.json.JSONObject
 /** One step of the learning pathway, in order, with Llama's reason and goal. */
 data class PathStep(val topicId: String, val why: String, val goal: String)
 
+/** Llama's advice after a quiz: what to do next, and which topic should come next on the pathway. */
+data class Coaching(val advice: String, val nextTopicId: String?, val why: String?)
+
 data class Pathway(val steps: List<PathStep>, val summary: String, val byLlama: Boolean) {
     fun toJson(): String = JSONObject().apply {
         put("summary", summary)
@@ -68,13 +71,13 @@ object Advisor {
             Course: ${course.title}. Skill check result per topic:
             $topics
 
-            Order all ${course.topics.size} topics into a learning pathway for this learner. Topics that need work or are new go first,
-            strong topics last as quick review. Use each topic's id exactly as written above. For each topic write "why"
-            (max 12 words, linked to the learner's goal or interests) and "goal" (one concrete, checkable goal, max 10 words).
-            Return JSON exactly like: {"pathway":[{"id":"${course.topics.first().id}","why":"...","goal":"..."}],"summary":"one encouraging sentence"}
+            Order all ${course.topics.size} topics for this learner: needs work and new first, strong last.
+            Use each id exactly as written. For each topic write "why": max 8 words, linked to the goal or interests.
+            Return JSON only, like: {"pathway":[{"id":"${course.topics.first().id}","why":"..."}],"summary":"max 12 words"}
         """.trimIndent()
-        repeat(2) { attempt ->
-            val reply = LlamaEngine.ask(context, persona(p) + " " + JSON_ONLY, if (attempt == 0) user else "$user\nYour previous reply was not valid JSON. Reply with the JSON object only, keep each text short.", 560)
+        // One short attempt: the plan is already on screen from the skill check, so a retry only keeps the learner waiting.
+        repeat(1) { attempt ->
+            val reply = LlamaEngine.ask(context, persona(p) + " " + JSON_ONLY, user, 300)
             val parsed = reply?.let { parsePathway(it, course, levels) }
             log("pathway attempt ${attempt + 1}: ${if (parsed != null) "ok" else "unusable"}: ${reply?.take(400)}")
             if (parsed != null) return parsed
@@ -182,9 +185,25 @@ object Advisor {
         val gaps = course.topics.filter { levels[it.id] != SkillLevel.STRONG }.joinToString { it.name }.ifBlank { "none" }
         return persona(p) + " Learner goal: ${p.goalText.ifBlank { p.goalType }} (${p.goalType}). Current course: ${course.title}. " +
             "Topics that still need work: $gaps. Interests: ${p.interests.replace(",", ", ")}. " +
-            "Answer clearly in a few short paragraphs or steps, with a small example when it helps. " +
-            "If the question is outside the learner's studies, answer briefly. If you are not sure, say so. Use plain text, no markdown."
+            "Match the length to the question. A greeting or quick fact: 1-2 sentences. A 'what is' or 'explain' question: " +
+            "one short paragraph and a small example. A plan, career path, roadmap or 'how do I prepare' question: at most 7 numbered steps, " +
+            "one or two lines each, then one closing sentence. No headings, no bold, no lists of websites. " +
+            "If you are not sure, say so. Plain text only."
     }
+
+    /** Output budget for a chat answer, from what was asked: short for small talk, longer for plans and explanations. */
+    fun chatBudget(question: String): Int {
+        val q = question.lowercase()
+        val long = listOf("plan", "path", "roadmap", "steps", "prepare", "career", "explain", "difference", "compare", "how do", "how can", "how to", "example")
+        return when {
+            long.any { it in q } -> 380
+            q.split(' ').size <= 4 -> 90
+            else -> 220
+        }
+    }
+
+    /** Small models write markdown anyway; the chat shows plain text, so drop the markers. */
+    fun plain(text: String) = text.replace("**", "").replace(Regex("(?m)^#{1,4}[ \t]*"), "")
 
     // ---------------------------------------------------------------- custom courses
     /**
@@ -221,6 +240,90 @@ object Advisor {
             CheckQuestion(tp.id, "How well do you know “${tp.name}”?", listOf("I can explain and use it", "I’ve seen it but I’m unsure", "Not sure yet"), 0)
         }
         return Course(id, name.trim().take(40), topics, check, custom = true)
+    }
+
+    /**
+     * After a quiz, Llama acts as the tutor: it looks at the score, the questions the learner got wrong, their goal
+     * and the topics still open, then gives specific advice and picks the topic to study next. AdSo moves that topic
+     * to the front of the pathway, so the AI itself adapts the plan over time.
+     */
+    suspend fun coach(
+        context: Context, p: ProfileEntity, course: Course, topicId: String, correct: Int, total: Int,
+        missed: List<String>, open: List<String>, levels: Map<String, SkillLevel>, deadline: String,
+    ): Coaching? {
+        val topic = Courses.topic(topicId)
+        val openList = open.joinToString("\n") { id -> "- id \"$id\" = ${Courses.topic(id).name} (${(levels[id] ?: SkillLevel.NEW).label})" }
+        val user = """
+            Learner goal: ${p.goalText.ifBlank { p.goalType }} (${p.goalType}). Target date: $deadline. ${p.minutesPerDay} minutes a day.
+            Quiz just taken on "${topic.name}": $correct of $total correct.
+            ${if (missed.isEmpty()) "No mistakes." else "Questions they got wrong: " + missed.joinToString(" | ") { it.take(110) }}
+            Topics still to study, in the current order:
+            ${openList.ifBlank { "none, the course is finished" }}
+
+            As their tutor, write "advice": max 2 short sentences: name the idea they got wrong, then say which topic to study next and why. Then pick "next":
+            the id of the topic they should study next (from the list above), and "why": max 8 words.
+            JSON: {"advice":"...","next":"${open.firstOrNull() ?: topicId}","why":"..."}
+        """.trimIndent()
+        val reply = LlamaEngine.ask(context, persona(p) + " " + JSON_ONLY, user, 120) ?: return null
+        val o = extractJson(reply) ?: salvageObjects(reply).firstOrNull()
+        val advice = plain(o?.optString("advice").orEmpty().trim()).take(260)
+        log("coach: ${if (advice.isNotBlank()) "ok" else "unusable"}: ${reply.take(300)}")
+        if (advice.isBlank()) return null
+        // Small models sometimes name one topic in the advice and pick another id; the advice is what the learner reads, so it wins.
+        val named = open.firstOrNull { id -> advice.contains(Courses.topic(id).name, ignoreCase = true) }
+        val next = named ?: o?.optString("next")?.let { resolveTopic(course, listOf(it)) }?.takeIf { it in open }
+        return Coaching(advice, next, o?.optString("why")?.trim()?.take(80)?.ifBlank { null })
+    }
+
+    /**
+     * Fixes a course name the learner typed: spelling, wrong letters, acronyms ("Tf antena" -> "RF Antenna").
+     * Llama suggests the standard name; it is only accepted if it is a small edit of what was typed, so a slip
+     * of the model can't turn the course into a different subject.
+     */
+    suspend fun fixTitle(context: Context, name: String): String {
+        val clean = tidyTitle(name)
+        val reply = LlamaEngine.ask(
+            context,
+            "You correct typos in course names. Reply with the corrected course name only, nothing else.",
+            "A student typed this course name: \"$name\". Fix spelling and mistyped letters, use the usual name of the subject, " +
+                "write acronyms in capitals (for example RF, AI, DSP, VLSI). Max 6 words.",
+            24,
+        ) ?: return clean
+        val fixed = reply.lines().firstOrNull { it.isNotBlank() }?.trim()?.trim('"', '.', '*', ' ', '\'')?.take(40).orEmpty()
+            .split(' ').joinToString(" ") { w -> if (w.length > 4 && w.none { it.isLowerCase() }) w.lowercase().replaceFirstChar { it.uppercase() } else w }
+        val a = clean.lowercase().filter { it.isLetterOrDigit() }
+        val b = fixed.lowercase().filter { it.isLetterOrDigit() }
+        val ok = b.isNotEmpty() && editDistance(a, b) <= maxOf(2, a.length * 3 / 10)
+        // Llama often adds words ("RF Communications and Antennas"); then fix each typed word from the closest word it wrote.
+        val result = if (ok) fixed else wordByWord(clean, fixed)
+        log("course name \"$name\" -> \"$fixed\" -> \"$result\"")
+        return result
+    }
+
+    private fun wordByWord(typed: String, suggestion: String): String {
+        val words = suggestion.split(Regex("[^A-Za-z0-9+#]+")).filter { it.isNotBlank() }
+        return typed.split(' ').joinToString(" ") { w ->
+            val lw = w.lowercase()
+            val best = words.map { s -> if (!lw.endsWith("s") && s.length > 3 && s.endsWith("s", true)) s.dropLast(1) else s }
+                .minByOrNull { editDistance(lw, it.lowercase()) }
+            if (best != null && editDistance(lw, best.lowercase()) <= maxOf(1, lw.length / 3)) best.replaceFirstChar { it.uppercase() } else w
+        }
+    }
+
+    /** Tidies spacing and capitals without the model: "tf  antenna" -> "TF Antenna". */
+    fun tidyTitle(s: String): String = s.trim().replace(Regex(" +"), " ").split(' ').joinToString(" ") { w ->
+        if (w.length in 2..4 && w.all { it.isLetter() } && w.none { it.lowercaseChar() in "aeiouy" }) w.uppercase()
+        else w.replaceFirstChar { it.uppercase() }
+    }
+
+    private fun editDistance(a: String, b: String): Int {
+        var prev = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            val cur = IntArray(b.length + 1); cur[0] = i
+            for (j in 1..b.length) cur[j] = minOf(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1)
+            prev = cur
+        }
+        return prev[b.length]
     }
 
     /** Every flat {...} object in the text that parses on its own (used on replies cut off mid-JSON). */

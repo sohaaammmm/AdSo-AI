@@ -335,9 +335,13 @@ object Content {
         "Lifelong learning" to "Learn for fun",
     )
     val studyLevels = listOf("School", "Undergraduate", "Postgraduate", "Working")
-    val deadlines = listOf("In 2 weeks" to 14, "In a month" to 30, "In 3 months" to 90, "No date" to 0)
-    val minuteOptions = listOf(15, 30, 45, 60)
-    val interests = listOf("Coding", "Maths", "Physics", "Data science", "Design", "Robotics", "Business", "Writing")
+    val deadlines = listOf("In 2 weeks" to 14, "In a month" to 30, "In 3 months" to 90, "In 6 months" to 182, "In 12 months" to 365, "No date" to 0)
+    val minuteOptions = listOf(15, 30, 45, 60, 120, 300, 360)
+    fun minutesLabel(m: Int) = if (m >= 60 && m % 60 == 0) "${m / 60} h" else "$m min"
+    val interests = listOf(
+        "Coding", "Maths", "Physics", "Chemistry", "Biology", "Electronics", "Data science", "AI", "Design", "Robotics",
+        "Business", "Finance", "Writing", "Music", "Art", "Gaming", "Sports", "Space", "Medicine", "History",
+    )
 
     /** UI languages. Llama 3.2 officially supports English and Hindi from this list, so AI text is good only there. */
     data class Language(val code: String, val native: String, val english: String, val aiGood: Boolean)

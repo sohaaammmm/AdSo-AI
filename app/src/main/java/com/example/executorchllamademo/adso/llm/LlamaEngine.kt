@@ -25,6 +25,25 @@ import java.util.concurrent.Executors
 data class ModelFile(val path: String, val name: String, val sizeGb: Float) {
     val label get() = name.removeSuffix(".pte").replace("-Instruct", " Instruct").replace("_", " ").replace("-", " ")
     val is3b get() = name.contains("3B", ignoreCase = true)
+    val isQat get() = name.contains("QLORA", ignoreCase = true) || name.contains("QAT", ignoreCase = true)
+    /** Short name for the UI, e.g. "Llama 3.2 1B · QAT+LoRA". */
+    val title get() = shortModelName(name)
+    val detail get() = when {
+        isQat -> "More accurate · same speed · ≈ 1.24 B parameters"
+        is3b -> "Best answers but slow · ≈ 3.21 B parameters"
+        else -> "Fastest · ≈ 1.24 B parameters"
+    }
+}
+
+/** "Llama-3.2-1B-Instruct-QLORA_INT4_EO8.pte" -> "Llama 3.2 1B · QAT+LoRA". */
+fun shortModelName(file: String): String {
+    val base = file.substringBefore("-Instruct").replace("-", " ")
+    val kind = when {
+        file.contains("QLORA", true) || file.contains("QAT", true) -> "QAT+LoRA"
+        file.contains("SpinQuant", true) -> "SpinQuant"
+        else -> null
+    }
+    return listOfNotNull(base, kind).joinToString(" · ")
 }
 
 /**
@@ -73,7 +92,8 @@ object LlamaEngine {
         }
         if (!File(TOKENIZER).canRead()) return null
         val models = availableModels()
-        val default = models.firstOrNull { it.name.contains("1B", ignoreCase = true) } ?: models.minByOrNull { it.sizeGb }
+        // QAT+LoRA 1B first (Meta's more accurate 1B build, same size and speed), then any 1B, then the smallest.
+        val default = models.firstOrNull { it.isQat && !it.is3b } ?: models.firstOrNull { it.name.contains("1B", ignoreCase = true) } ?: models.minByOrNull { it.sizeGb }
         return default?.let { it.path to TOKENIZER }
     }
 

@@ -29,7 +29,11 @@ import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -37,6 +41,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -54,6 +59,7 @@ import com.example.executorchllamademo.adso.AdsoViewModel
 import com.example.executorchllamademo.adso.Screen
 import com.example.executorchllamademo.adso.data.Content
 import com.example.executorchllamademo.adso.data.Courses
+import com.example.executorchllamademo.adso.data.Course
 import com.example.executorchllamademo.adso.data.SkillLevel
 import com.example.executorchllamademo.ui.components.OrbState
 import com.example.executorchllamademo.ui.theme.AdsoTheme
@@ -187,8 +193,8 @@ fun GoalScreen(vm: AdsoViewModel, editing: Boolean) {
             }
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 FieldLabel("Time each day")
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Content.minuteOptions.forEach { m -> SelectChip("$m min", p.minutesPerDay == m, { vm.updateProfile { copy(minutesPerDay = m) } }, Modifier.weight(1f)) }
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Content.minuteOptions.forEach { m -> SelectChip(Content.minutesLabel(m), p.minutesPerDay == m, { vm.updateProfile { copy(minutesPerDay = m) } }) }
                 }
             }
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -220,6 +226,30 @@ fun CoursesScreen(vm: AdsoViewModel) {
                 Text(tr("What are you studying?"), style = MaterialTheme.typography.headlineLarge, color = c.textPrimary)
                 Text("Each course gets a short skill check, then its own learning pathway. Tap a course to work on it.", color = c.textSecondary, fontSize = 14.sp, lineHeight = 20.sp)
             }
+            var toDelete by remember { mutableStateOf<Course?>(null) }
+            toDelete?.let { d ->
+                AlertDialog(
+                    onDismissRequest = { toDelete = null },
+                    title = { Text("Remove ${d.title}?") },
+                    text = { Text("Its skill check, progress and learning pathway are deleted. You can add it again later and start fresh.") },
+                    confirmButton = { TextButton({ vm.deleteCourse(d.id); toDelete = null }) { Text("Remove", color = c.error) } },
+                    dismissButton = { TextButton({ toDelete = null }) { Text("Keep") } },
+                    containerColor = c.cardRaised, titleContentColor = c.textPrimary, textContentColor = c.textSecondary,
+                )
+            }
+            var toRename by remember { mutableStateOf<Course?>(null) }
+            toRename?.let { r ->
+                var newName by remember(r.id) { mutableStateOf(r.title) }
+                AlertDialog(
+                    onDismissRequest = { toRename = null },
+                    title = { Text("Rename course") },
+                    text = { AdsoTextField(newName, { newName = it }, "Course name") },
+                    confirmButton = { TextButton({ vm.renameCourse(r.id, newName); toRename = null }) { Text("Save", color = c.info) } },
+                    dismissButton = { TextButton({ toRename = null }) { Text("Cancel") } },
+                    containerColor = c.cardRaised, titleContentColor = c.textPrimary, textContentColor = c.textSecondary,
+                )
+            }
+            val canDelete = vm.addedCourses.size > 1
             vm.addedCourses.map { Courses.get(it) }.distinctBy { it.id }.forEach { course ->
                 val active = course.id == vm.course.id
                 val pct = vm.courseProgress(course)
@@ -236,6 +266,8 @@ fun CoursesScreen(vm: AdsoViewModel) {
                             )
                         }
                         Text("$pct%", color = c.info, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        if (course.custom) CircleIconButton(Icons.Rounded.Edit, "Rename ${course.title}", { toRename = course }, size = 36.dp)
+                        if (canDelete) CircleIconButton(Icons.Rounded.DeleteOutline, "Remove ${course.title}", { toDelete = course }, size = 36.dp)
                     }
                     Spacer(Modifier.size(12.dp))
                     LevelBar(pct / 100f, c.info)
@@ -410,6 +442,6 @@ fun GeneratingScreen(vm: AdsoViewModel) {
         Spacer(Modifier.size(18.dp))
         Tag(vm.generatingDetail, c.info, c.infoTile)
         Spacer(Modifier.size(8.dp))
-        Text("Runs fully on your phone. This can take up to a minute.", color = c.textSecondary, fontSize = 12.sp)
+        Text("Runs fully on your phone. Your plan opens in a moment; Llama keeps refining it in the background.", color = c.textSecondary, fontSize = 12.sp)
     }
 }
