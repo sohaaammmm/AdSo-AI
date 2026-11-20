@@ -231,6 +231,7 @@ fun SettingsScreen(vm: AdsoViewModel, onAdvanced: () -> Unit, onLogs: () -> Unit
             Divider()
             SettingsLink("Retake skill check") { vm.startSkillCheck() }
         }
+        if (vm.needsModel) ModelDownloadCard(vm)
         ModelCard(vm, onAdvanced, onLogs)
         GlassCard {
             Text(tr("Appearance"), style = MaterialTheme.typography.titleMedium, color = c.textPrimary)
@@ -242,13 +243,36 @@ fun SettingsScreen(vm: AdsoViewModel, onAdvanced: () -> Unit, onLogs: () -> Unit
             Spacer(Modifier.size(16.dp))
             Text(tr("Language"), style = MaterialTheme.typography.titleMedium, color = c.textPrimary)
             Text(
-                "Hindi translates the whole app and Llama answers in Hindi. Other languages translate the main menus; AI answers stay in English.",
+                "Llama answers in Hindi, Tamil, Telugu, Bengali and Marathi (Hindi is best; the others are beta on this small model). In chat it replies in the language you write in. Other languages translate the menus.",
                 color = c.textSecondary, fontSize = 12.sp, lineHeight = 17.sp, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
             )
             FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Content.languages.forEach { l -> SelectChip(l.native, p.language == l.code, { vm.updateProfile { copy(language = l.code) } }, sub = if (l.aiGood) "AI: good" else "Menus only") }
+                Content.languages.forEach { l -> SelectChip(l.native, p.language == l.code, { vm.updateProfile { copy(language = l.code) } }, sub = if (l.aiGood) "AI: good" else if (l.aiBeta) "AI: beta" else "Menus only") }
             }
         }
+    }
+}
+
+/** One-time download of the AI model, shown on Home and in Settings until a model is on the phone. */
+@Composable
+fun ModelDownloadCard(vm: AdsoViewModel) {
+    val c = AdsoTheme.colors
+    val d = com.example.executorchllamademo.adso.llm.ModelDownloader
+    GlassCard(outline = c.info, fill = c.infoTile) {
+        Text("Get AdSo’s AI (one time)", color = c.textPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text(
+            "Llama 3.2 1B, 1.18 GB, from the ExecuTorch community on Hugging Face. Use Wi-Fi. After this, AdSo works fully offline.",
+            color = c.textSecondary, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp),
+        )
+        if (d.running || d.downloaded > 0) {
+            LevelBar(d.downloaded / d.totalBytes.toFloat(), c.info)
+            Text(
+                "${d.stage.ifBlank { "Paused" }}  %.2f of %.2f GB".format(d.downloaded / 1e9, d.totalBytes / 1e9),
+                color = c.textSecondary, fontSize = 12.sp, modifier = Modifier.padding(top = 6.dp, bottom = 8.dp),
+            )
+        }
+        d.error?.let { Text(it, color = c.error, fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp)) }
+        if (!d.running) PrimaryButton(if (d.downloaded > 0) "Resume download" else "Download", { vm.downloadModel() }, Modifier.fillMaxWidth())
     }
 }
 
@@ -274,7 +298,7 @@ fun ModelCard(vm: AdsoViewModel, onAdvanced: () -> Unit, onLogs: () -> Unit) {
             LlamaEngine.Status.NOT_LOADED -> "Starts when needed"
         })
         if (models.isEmpty()) {
-            Text("No model files in ${LlamaEngine.MODEL_DIR}. Copy a .pte model and tokenizer.model there.", color = c.error, fontSize = 13.sp, modifier = Modifier.padding(vertical = 6.dp))
+            Text("No model on this phone yet. Download it from Home (or copy a .pte and tokenizer.model to ${LlamaEngine.MODEL_DIR}).", color = c.error, fontSize = 13.sp, modifier = Modifier.padding(vertical = 6.dp))
         }
         models.forEach { m ->
             Row(

@@ -17,8 +17,10 @@ Built for the Bharat AI-SoC Challenge 2026–27, Problem Statement 4 (personalis
 | Adapt over time | After every quiz, Llama reviews your score and the questions you missed, gives advice and moves the topic you should study next to the front of the pathway |
 
 Also: 8 built-in courses plus any course you name (Llama designs it), lessons written by Llama, adaptive quizzes,
-an "Ask AdSo" tutor chat with history, "For your interests" examples on Home, a real study-time graph
-(counted while the app is open), and Hindi for the whole app and the AI's answers (main menus in 11 more Indian languages).
+an "Ask AdSo" tutor chat with history that can also change your plan ("I only have 2 hours a day"),
+a week-by-week roadmap to your target date, free resources for each lesson, "For your interests" examples on Home, a real study-time graph
+(counted while the app is open), and Indian languages: Hindi for the whole app; Llama also answers in Tamil, Telugu, Bengali and Marathi (beta),
+replying in the language you write in; main menus in 11 more languages.
 
 ## Model and runtime
 
@@ -26,7 +28,7 @@ an "Ask AdSo" tutor chat with history, "For your interests" examples on Home, a 
 |---|---|
 | Default model | Llama 3.2 1B Instruct, **QAT+LoRA**, INT4 weights / 8-bit dynamic activations (≈ 1.24 B parameters, 1.18 GB) |
 | Also supported | Llama 3.2 1B Instruct SpinQuant INT4 (1.14 GB) |
-| Runtime | ExecuTorch 1.1.0 Android library, XNNPACK CPU backend (Arm) |
+| Runtime | ExecuTorch 1.1.0 Android library, XNNPACK CPU backend with Arm KleidiAI kernels |
 | Context | 2,048 tokens |
 | Temperature | 0.70–0.80 (Settings → Advanced) |
 
@@ -38,26 +40,29 @@ Measured on a TECNO POVA 5 Pro 5G (MediaTek Dimensity 6080, 2× Cortex-A76 + 6×
 | Generation | 7.9 tokens/s | 8.2 tokens/s |
 | Prompt processing | 29 tokens/s | – |
 | Advice after a quiz | 3.5 s | – |
+| App memory (PSS) while loaded | ≈ 1.9 GB total, model ≈ 1.6 GB native heap | – |
 | Learning pathway (5 topics) | – | 31 s (the plan shows instantly; Llama refines it in the background) |
 
 More detail, findings and limitations: [docs/technical-report.md](docs/technical-report.md).
 
 ## Run it
 
-1. Get the model and tokenizer (public, from the ExecuTorch community on Hugging Face):
-   `Llama-3.2-1B-Instruct-QLORA_INT4_EO8.pte` and `tokenizer.model` from
-   https://huggingface.co/executorch-community/Llama-3.2-1B-Instruct-QLORA_INT4_EO8-ET
-2. Copy them to the phone (USB debugging on):
-   ```bash
-   adb shell mkdir -p /data/local/tmp/llama
-   adb push Llama-3.2-1B-Instruct-QLORA_INT4_EO8.pte tokenizer.model /data/local/tmp/llama/
-   ```
-3. Build and install (JDK 17 or 21):
-   ```bash
-   ./gradlew assembleDebug
-   adb install -r app/build/outputs/apk/debug/app-debug.apk
-   ```
-4. Open **AdSo AI**. The model loads by itself when the app starts.
+**Easiest:** install the release APK (about 20 MB, Arm 64-bit phones), open **AdSo AI** and tap **Download** on the
+"Get AdSo's AI" card. It fetches Llama 3.2 1B QAT+LoRA (1.18 GB) once from the
+[ExecuTorch community on Hugging Face](https://huggingface.co/executorch-community/Llama-3.2-1B-Instruct-QLORA_INT4_EO8-ET),
+checks its SHA-256, and from then on AdSo works fully offline.
+
+**With a PC (adb):**
+```bash
+adb shell mkdir -p /data/local/tmp/llama
+adb push Llama-3.2-1B-Instruct-QLORA_INT4_EO8.pte tokenizer.model /data/local/tmp/llama/
+```
+
+**Build it yourself** (JDK 17 or 21):
+```bash
+./gradlew assembleRelease   # app/build/outputs/apk/release/app-release.apk
+./gradlew assembleDebug     # app/build/outputs/apk/debug/app-debug.apk
+```
 
 ## How it is built
 

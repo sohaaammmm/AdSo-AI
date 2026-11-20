@@ -3,6 +3,7 @@ package com.example.executorchllamademo.adso.llm
 import android.content.Context
 import com.example.executorchllamademo.ETLogging
 import com.example.executorchllamademo.adso.data.CheckQuestion
+import com.example.executorchllamademo.adso.data.Content
 import com.example.executorchllamademo.adso.data.Course
 import com.example.executorchllamademo.adso.data.Courses
 import com.example.executorchllamademo.adso.data.ProfileEntity
@@ -15,6 +16,11 @@ import org.json.JSONObject
 
 /** One step of the learning pathway, in order, with Llama's reason and goal. */
 data class PathStep(val topicId: String, val why: String, val goal: String)
+
+/** A change to the study plan asked for in chat ("I only have 2 hours a day", "focus on graphs first", "I already know arrays"). */
+data class PlanChange(val minutesPerDay: Int? = null, val deadlineDays: Int? = null, val focusTopicId: String? = null, val doneTopicIds: List<String> = emptyList()) {
+    val isEmpty get() = minutesPerDay == null && deadlineDays == null && focusTopicId == null && doneTopicIds.isEmpty()
+}
 
 /** Llama's advice after a quiz: what to do next, and which topic should come next on the pathway. */
 data class Coaching(val advice: String, val nextTopicId: String?, val why: String?)
@@ -44,9 +50,11 @@ data class Pathway(val steps: List<PathStep>, val summary: String, val byLlama: 
 object Advisor {
     private const val JSON_ONLY = "Reply with valid JSON only. No markdown, no text before or after the JSON."
 
-    private fun persona(p: ProfileEntity) =
+    private fun persona(p: ProfileEntity, lang: String = p.language) =
         "You are AdSo, a friendly, encouraging study coach inside an offline phone app. The learner is a ${p.studyLevel} student." +
-            if (p.language == "hi") " Write all learner-facing text in Hindi (Devanagari script); keep code, formulas and JSON keys in English." else ""
+            Content.language(lang).let { l ->
+                if (l.code != "en" && l.aiWrites) " Write all learner-facing text in ${l.english} (${l.native} script) only; keep code, formulas and JSON keys in English." else ""
+            }
 
     // ---------------------------------------------------------------- pathway
     /** Rule-based pathway: gaps first (needs work, then new), strong topics last as review. */
@@ -175,15 +183,16 @@ object Advisor {
             SessionKind.REVIEW -> "Write a quick review of \"${topic.name}\": 4 key points as short lines starting with '•', then one tricky mistake to avoid."
             SessionKind.QUIZ -> "Give 3 tips for answering questions about \"${topic.name}\"."
         }
-        val user = "Course: ${course.title}. Learner goal: ${p.goalText.ifBlank { p.goalType }}. Lesson goal: ${topic.goal}.\n$task\nUse plain text, no markdown headings or bold. End with one line starting 'Try this:' and a quick question."
+        val user = "Course: ${course.title}. Learner goal: ${p.goalText.ifBlank { p.goalType }}. Lesson goal: ${topic.goal}.\n$task\nUse plain text, no markdown headings or bold. End with one line starting 'Try this:' and a quick question." +
+            (if (course.custom) " Then one last line starting 'Search for:' with 2 short search phrases to find good free material on this topic." else "")
         return LlamaEngine.ask(context, persona(p), user, 360, onText)
     }
 
     // ---------------------------------------------------------------- chat tutor
     /** System prompt for the Ask AdSo chat: knows the learner's goal, course and gaps. */
-    fun chatSystem(p: ProfileEntity, course: Course, levels: Map<String, SkillLevel>): String {
+    fun chatSystem(p: ProfileEntity, course: Course, levels: Map<String, SkillLevel>, replyLanguage: String = p.language): String {
         val gaps = course.topics.filter { levels[it.id] != SkillLevel.STRONG }.joinToString { it.name }.ifBlank { "none" }
-        return persona(p) + " Learner goal: ${p.goalText.ifBlank { p.goalType }} (${p.goalType}). Current course: ${course.title}. " +
+        return persona(p, replyLanguage) + " Learner goal: ${p.goalText.ifBlank { p.goalType }} (${p.goalType}). Current course: ${course.title}. " +
             "Topics that still need work: $gaps. Interests: ${p.interests.replace(",", ", ")}. " +
             "Match the length to the question. A greeting or quick fact: 1-2 sentences. A 'what is' or 'explain' question: " +
             "one short paragraph and a small example. A plan, career path, roadmap or 'how do I prepare' question: at most 7 numbered steps, " +
@@ -273,6 +282,47 @@ object Advisor {
         val named = open.firstOrNull { id -> advice.contains(Courses.topic(id).name, ignoreCase = true) }
         val next = named ?: o?.optString("next")?.let { resolveTopic(course, listOf(it)) }?.takeIf { it in open }
         return Coaching(advice, next, o?.optString("why")?.trim()?.take(80)?.ifBlank { null })
+    }
+
+    /**
+     * Reads a chat message for a change to the study plan. Numbers (daily time, target date) are read with rules,
+     * which is exact; which topic to focus on or skip is understood by Llama (it handles loose wording), and only
+     * topics of the current course are accepted.
+     */
+    suspend fun planChange(context: Context, p: ProfileEntity, course: Course, open: List<String>, message: String): PlanChange? {
+        val m = message.lowercase()
+        val num = "(\\d+(?:\\.\\d+)?)"
+        var minutes: Int? = null
+        Regex("$num\\s*(hours?|hrs?|h)\\b").find(m)?.let { minutes = (it.groupValues[1].toFloat() * 60).toInt() }
+        Regex("$num\\s*(minutes?|mins?)\\b").find(m)?.let { minutes = (minutes ?: 0) + it.groupValues[1].toFloat().toInt() }
+        if (minutes != null && !Regex("(a|per|each|every) day|daily|/day").containsMatchIn(m)) {
+            // "5 hours a week" -> per day
+            minutes = if (Regex("(a|per|each|every) week|weekly").containsMatchIn(m)) minutes!! / 7 else if (Regex("plan|study|time|have|only|can").containsMatchIn(m)) minutes else null
+        }
+        var days: Int? = null
+        Regex("(exam|test|deadline|interview|due|target|finish|in)\\D{0,20}?$num\\s*(days?|weeks?|months?)").find(m)?.let {
+            val n = it.groupValues[2].toFloat()
+            days = when { it.groupValues[3].startsWith("week") -> (n * 7).toInt(); it.groupValues[3].startsWith("month") -> (n * 30).toInt(); else -> n.toInt() }
+        }
+        var focus: String? = null
+        var done = emptyList<String>()
+        if (Regex("focus|first|start with|priorit|skip|already know|i know|done with|finished|move|before|next").containsMatchIn(m) && open.isNotEmpty()) {
+            val list = open.joinToString("\n") { "- id \"$it\" = ${Courses.topic(it).name}" }
+            val user = """
+                Topics in the learner's plan:
+                $list
+                The learner wrote: "$message"
+                Which topic do they want to study first ("focus"), and which topics do they say they already know or want to skip ("done")?
+                Use ids from the list, or "" / [] if none. JSON: {"focus":"","done":[]}
+            """.trimIndent()
+            val reply = LlamaEngine.ask(context, "You read study-plan requests. " + JSON_ONLY, user, 60)
+            val o = reply?.let { extractJson(it) ?: salvageObjects(it).firstOrNull() }
+            log("plan change: ${reply?.take(200)}")
+            focus = o?.optString("focus")?.takeIf { it.isNotBlank() }?.let { resolveTopic(course, listOf(it)) }?.takeIf { it in open }
+            val arr = o?.optJSONArray("done")
+            done = (0 until (arr?.length() ?: 0)).mapNotNull { i -> resolveTopic(course, listOf(arr!!.optString(i))) }.filter { it in open && it != focus }
+        }
+        return PlanChange(minutes?.coerceIn(10, 480), days?.coerceIn(1, 730), focus, done).takeIf { !it.isEmpty }
     }
 
     /**

@@ -140,6 +140,8 @@ fun HomeScreen(vm: AdsoViewModel) {
             }
         }
 
+        if (vm.needsModel) ModelDownloadCard(vm)
+
         // Today's focus
         Row(
             Modifier.fillMaxWidth().clip(CardShape)
@@ -242,7 +244,7 @@ fun PlanScreen(vm: AdsoViewModel) {
             }
         }
         Row(Modifier.fillMaxWidth().clip(Pill).background(c.card).border(1.dp, c.cardOutline, Pill).padding(4.dp)) {
-            listOf(false to tr("This week"), true to tr("Learning route")).forEach { (route, label) ->
+            listOf(false to tr("This week"), true to tr("Roadmap")).forEach { (route, label) ->
                 val on = vm.planTabRoute == route
                 Box(
                     Modifier.weight(1f).heightIn(min = 40.dp).clip(Pill).background(if (on) c.primary else Color.Transparent)
@@ -264,6 +266,21 @@ fun PlanScreen(vm: AdsoViewModel) {
                 }
             }
         } else {
+            // Week-by-week roadmap to the target date
+            GlassCard(padding = 14.dp) {
+                Text(tr("Roadmap") + " · " + (if (vm.profile.deadlineDays > 0) "until ${vm.deadlineLabel()}" else "no fixed date"), color = c.textPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("${Content.minutesLabel(vm.profile.minutesPerDay)} a day", color = c.textSecondary, fontSize = 12.sp, modifier = Modifier.padding(bottom = 6.dp))
+                vm.roadmap.forEach { w ->
+                    Row(Modifier.padding(vertical = 6.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(w.label, color = c.info, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.width(92.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(w.title, color = c.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                            Text(w.detail, color = c.textSecondary, fontSize = 12.sp, lineHeight = 17.sp)
+                        }
+                    }
+                }
+                if (vm.roadmap.isEmpty()) Text("Every topic is done. Add a course or retake the skill check.", color = c.textSecondary, fontSize = 13.sp)
+            }
             if (vm.pathway?.byLlama == true) Text("Order, reasons and goals written by Llama on this phone.", color = c.textSecondary, fontSize = 12.sp)
             val now = vm.currentTopicId
             Column {
@@ -325,6 +342,14 @@ fun LessonScreen(vm: AdsoViewModel) {
                 }
             }
             if (!vm.lessonLoading && !vm.lessonFailed) Text("Written by Llama on this phone for your goal and interests.", color = c.textSecondary, fontSize = 12.sp)
+            // Resources: hand-picked free material for built-in courses; custom courses get Llama's search phrases in the lesson.
+            Content.resources[vm.course.id]?.let { list ->
+                GlassCard(padding = 14.dp) {
+                    Text(tr("Resources"), color = c.textPrimary, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    list.forEach { r -> Text("• $r", color = c.textSecondary, fontSize = 13.sp, lineHeight = 19.sp, modifier = Modifier.padding(top = 4.dp)) }
+                    Text("Open these when you have internet; AdSo itself works offline.", color = c.textSecondary, fontSize = 11.sp, modifier = Modifier.padding(top = 6.dp))
+                }
+            }
         }
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             if (s.kind == SessionKind.REVIEW) {

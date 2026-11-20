@@ -24,8 +24,10 @@ import com.example.executorchllamademo.adso.data.SkillEntity
 import com.example.executorchllamademo.adso.data.SkillLevel
 import com.example.executorchllamademo.adso.llm.Advisor
 import com.example.executorchllamademo.adso.llm.LlamaEngine
+import com.example.executorchllamademo.adso.llm.ModelDownloader
 import com.example.executorchllamademo.adso.llm.PathStep
 import com.example.executorchllamademo.adso.llm.Pathway
+import com.example.executorchllamademo.adso.llm.PlanChange
 import com.example.executorchllamademo.adso.llm.shortModelName
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
@@ -45,6 +47,7 @@ data class PlanDay(val label: String, val sessions: List<Session>) {
     val totalMinutes get() = sessions.sumOf { it.minutes }
 }
 data class QuizResult(val topicId: String, val correct: Int, val total: Int, val newLevel: SkillLevel, val note: String)
+data class RoadmapWeek(val label: String, val title: String, val detail: String, val topicIds: List<String>)
 data class ChatMsg(val mine: Boolean, val text: String, val meta: String = "")
 
 /**
@@ -130,6 +133,7 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
     var accuracy by mutableStateOf<Int?>(null); private set
 
     init {
+        LlamaEngine.appModelDir = ModelDownloader.dir(app)
         viewModelScope.launch {
             dao.profile()?.let { profile = it }
             LlamaEngine.temperature = profile.temperature.coerceIn(0.7f, 0.8f)
@@ -411,6 +415,43 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
     val currentTopicId get() = route.firstOrNull { it.topicId !in completed }?.topicId
 
     val plan: List<PlanDay> get() = buildPlan()
+
+    /**
+     * Week-by-week roadmap to the target date, following the pathway order. New topics get the most weeks, topics that
+     * need work fewer, known ones the least; if there is time left, the last week is a final review.
+     */
+    val roadmap: List<RoadmapWeek>
+        get() {
+            val open = route.filter { it.topicId !in completed }
+            if (open.isEmpty()) return emptyList()
+            val totalWeeks = if (profile.deadlineDays > 0) ((profile.deadlineDays + 6) / 7).coerceIn(1, 52) else open.size + 1
+            val studyWeeks = if (totalWeeks > open.size) totalWeeks - 1 else totalWeeks
+            val weight = open.map { when (levelOf(it.topicId)) { SkillLevel.NEW -> 3.0; SkillLevel.SHAKY -> 2.0; SkillLevel.STRONG -> 1.0 } }
+            val groups: List<Pair<List<PathStep>, Int>> = if (studyWeeks >= open.size) {
+                // Every topic gets at least a week; spare weeks go to the heaviest topics.
+                val extra = studyWeeks - open.size
+                val raw = weight.map { it / weight.sum() * extra }
+                val weeks = raw.map { 1 + it.toInt() }.toMutableList()
+                var left = studyWeeks - weeks.sum()
+                raw.withIndex().sortedByDescending { it.value - it.value.toInt() }.forEach { if (left > 0) { weeks[it.index]++; left-- } }
+                open.mapIndexed { i, s -> listOf(s) to weeks[i] }
+            } else {
+                val per = (open.size + studyWeeks - 1) / studyWeeks
+                open.chunked(per).map { it to 1 }
+            }
+            val hoursPerWeek = profile.minutesPerDay * 7 / 60f
+            var week = 1
+            val out = groups.map { (steps, n) ->
+                val label = if (n == 1) "Week $week" else "Weeks $week–${week + n - 1}"
+                week += n
+                RoadmapWeek(
+                    label, steps.joinToString(" + ") { Courses.topic(it.topicId).name },
+                    steps.joinToString(" ") { it.goal.trimEnd('.') + "." } + " About %.0f h.".format(hoursPerWeek * n),
+                    steps.map { it.topicId },
+                )
+            }
+            return if (totalWeeks > studyWeeks) out + RoadmapWeek("Week $week", "Final review", "Review every topic and take the quizzes again before ${deadlineLabel()}.", emptyList()) else out
+        }
     val firstSession: Session get() = plan.firstOrNull()?.sessions?.firstOrNull() ?: Session(SessionKind.REVIEW, topics.first().id, "Keep it fresh", profile.minutesPerDay)
     val upcoming: List<Pair<String, Session>> get() = plan.flatMap { d -> d.sessions.map { d.label to it } }.drop(1).take(3)
 
@@ -660,11 +701,17 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
         chatMessages.add(ChatMsg(true, text))
         chatBusy = true; chatStreaming = ""
         chatJob = viewModelScope.launch {
+            // If the message asks to change the plan (time, date, focus, skip), change it first, then let Llama answer.
+            val change = Advisor.planChange(getApplication(), profile, course, route.filter { it.topicId !in completed }.map { it.topicId }, text)
+            val changed = change?.let { applyPlanChange(it) }
+            if (changed != null) chatMessages.add(ChatMsg(false, "✓ $changed", "Plan updated"))
             val id = chatId ?: dao.insertChat(ChatEntity(title = text.take(40), updated = System.currentTimeMillis())).also { chatId = it }
             dao.insertMessage(ChatMessageEntity(chatId = id, mine = true, text = text, time = System.currentTimeMillis()))
             val ctx = getApplication<Application>()
             val turns = chatMessages.map { LlamaEngine.Turn(it.mine, it.text) }
-            val system = Advisor.chatSystem(profile, course, topics.associate { it.id to levelOf(it.id) })
+            // Reply in the language the question is written in (the challenge asks: Hindi question -> Hindi answer).
+            val system = Advisor.chatSystem(profile, course, topics.associate { it.id to levelOf(it.id) }, Content.detectLanguage(text, profile.language)) +
+                (changed?.let { " AdSo has just changed the study plan: $it Confirm it in one short sentence, then answer anything else they asked." } ?: "")
             val start = System.currentTimeMillis()
             val reply = LlamaEngine.chat(ctx, system, turns, Advisor.chatBudget(text)) { chatStreaming = Advisor.plain(it) }?.let(Advisor::plain)
             val answer = reply?.ifBlank { null } ?: chatStreaming?.ifBlank { null }
@@ -683,6 +730,40 @@ class AdsoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopChat() { LlamaEngine.stop() }
+
+    /** True when no model is on the phone yet (then Home and Settings offer the one-time download). */
+    val needsModel get() = LlamaEngine.status == LlamaEngine.Status.MISSING || (LlamaEngine.status != LlamaEngine.Status.READY && LlamaEngine.availableModels().isEmpty())
+
+    fun downloadModel() = viewModelScope.launch {
+        val app = getApplication<Application>()
+        if (ModelDownloader.download(app)) LlamaEngine.ensureLoaded(app)
+    }
+
+
+    /** Applies a plan change asked for in chat and returns what changed, in words (null if nothing did). */
+    private suspend fun applyPlanChange(ch: PlanChange): String? {
+        val parts = mutableListOf<String>()
+        ch.minutesPerDay?.takeIf { it != profile.minutesPerDay }?.let { m -> updateProfile { copy(minutesPerDay = m) }; parts += "${Content.minutesLabel(m)} a day" }
+        ch.deadlineDays?.takeIf { it != profile.deadlineDays }?.let { d -> updateProfile { copy(deadlineDays = d) }; parts += "target date ${deadlineLabel()}" }
+        if (ch.doneTopicIds.isNotEmpty()) {
+            completed = completed + ch.doneTopicIds
+            levels = levels + ch.doneTopicIds.associateWith { SkillLevel.STRONG }
+            saveSkillsNow()
+            parts += ch.doneTopicIds.joinToString(", ") { Courses.topic(it).name } + " marked as known"
+        }
+        ch.focusTopicId?.let { f ->
+            val c = course
+            val pw = pathways[c.id] ?: Advisor.rulesPathway(c, c.topics.associate { it.id to levelOf(it.id) })
+            pw.steps.firstOrNull { it.topicId == f }?.let { step ->
+                savePathway(c, Pathway(listOf(step.copy(why = "You asked to focus on this")) + pw.steps.filter { it.topicId != f }, pw.summary, pw.byLlama))
+                parts += "${Courses.topic(f).name} moved to the front"
+            }
+        }
+        if (parts.isEmpty()) return null
+        val text = "Plan updated: " + parts.joinToString("; ") + "."
+        updateProfile { copy(planNote = text) }
+        return text
+    }
 
     /** Suggested questions for an empty chat, from the learner's current topic. */
     val chatSuggestions: List<String>

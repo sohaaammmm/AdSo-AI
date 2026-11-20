@@ -236,8 +236,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // Smaller APK for sharing: Arm 64-bit phones only, unused code and resources removed.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            ndk { abiFilters += "arm64-v8a" }
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Signed with the local debug key so it installs directly. Use a real upload key before a Play Store release.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {

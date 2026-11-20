@@ -343,15 +343,56 @@ object Content {
         "Business", "Finance", "Writing", "Music", "Art", "Gaming", "Sports", "Space", "Medicine", "History",
     )
 
-    /** UI languages. Llama 3.2 officially supports English and Hindi from this list, so AI text is good only there. */
-    data class Language(val code: String, val native: String, val english: String, val aiGood: Boolean)
+    /**
+     * UI languages. Llama 3.2 officially supports English and Hindi; the challenge also asks for Tamil, Telugu,
+     * Bengali and Marathi, so Llama is asked to answer in those too (aiBeta: the 1B model's quality there is weaker).
+     */
+    data class Language(val code: String, val native: String, val english: String, val aiGood: Boolean, val aiBeta: Boolean = false) {
+        val aiWrites get() = aiGood || aiBeta
+    }
+    /** Free, well-known study resources for the built-in courses (names only: the app works offline). */
+    val resources: Map<String, List<String>> = mapOf(
+        "ds" to listOf("VisuAlgo (visualgo.net): animations of every data structure", "Introduction to Algorithms (Cormen et al.): the standard textbook", "NPTEL: Programming, Data Structures and Algorithms using Python"),
+        "dm" to listOf("MIT OpenCourseWare 6.042J: Mathematics for Computer Science", "Discrete Mathematics and Its Applications (Rosen)"),
+        "py" to listOf("The official Python Tutorial (docs.python.org)", "Automate the Boring Stuff with Python (free to read online)"),
+        "os" to listOf("Operating Systems: Three Easy Pieces (free online, ostep.org)", "Operating System Concepts (Silberschatz, Galvin, Gagne)"),
+        "db" to listOf("CMU 15-445 Database Systems lectures (free on YouTube)", "Database System Concepts (Silberschatz, Korth, Sudarshan)"),
+        "cn" to listOf("Computer Networking: A Top-Down Approach (Kurose and Ross)", "Beej's Guide to Network Programming (free online)"),
+        "ml" to listOf("Google Machine Learning Crash Course (free)", "scikit-learn User Guide", "Machine Learning Specialization by Andrew Ng (Coursera)"),
+        "calc" to listOf("Khan Academy: Calculus", "MIT OpenCourseWare 18.01: Single Variable Calculus", "3Blue1Brown: Essence of Calculus (YouTube)"),
+    )
+
+    fun language(code: String) = languages.firstOrNull { it.code == code } ?: languages.first()
+
+    /** The language a message is written in, from its script (Latin = English). Devanagari is Marathi only if that's the app language. */
+    fun detectLanguage(text: String, appLanguage: String): String {
+        val counts = HashMap<String, Int>()
+        for (ch in text) {
+            val code = when (ch.code) {
+                in 0x0900..0x097F -> if (appLanguage == "mr") "mr" else "hi"
+                in 0x0980..0x09FF -> if (appLanguage == "as") "as" else "bn"
+                in 0x0A00..0x0A7F -> "pa"
+                in 0x0A80..0x0AFF -> "gu"
+                in 0x0B00..0x0B7F -> "or"
+                in 0x0B80..0x0BFF -> "ta"
+                in 0x0C00..0x0C7F -> "te"
+                in 0x0C80..0x0CFF -> "kn"
+                in 0x0D00..0x0D7F -> "ml"
+                in 0x0600..0x06FF -> "ur"
+                in 'a'.code..'z'.code, in 'A'.code..'Z'.code -> "en"
+                else -> null
+            } ?: continue
+            counts[code] = (counts[code] ?: 0) + 1
+        }
+        return counts.maxByOrNull { it.value }?.key ?: appLanguage
+    }
     val languages = listOf(
         Language("en", "English", "English", true),
         Language("hi", "हिन्दी", "Hindi", true),
-        Language("bn", "বাংলা", "Bengali", false),
-        Language("te", "తెలుగు", "Telugu", false),
-        Language("mr", "मराठी", "Marathi", false),
-        Language("ta", "தமிழ்", "Tamil", false),
+        Language("bn", "বাংলা", "Bengali", false, aiBeta = true),
+        Language("te", "తెలుగు", "Telugu", false, aiBeta = true),
+        Language("mr", "मराठी", "Marathi", false, aiBeta = true),
+        Language("ta", "தமிழ்", "Tamil", false, aiBeta = true),
         Language("gu", "ગુજરાતી", "Gujarati", false),
         Language("kn", "ಕನ್ನಡ", "Kannada", false),
         Language("ml", "മലയാളം", "Malayalam", false),

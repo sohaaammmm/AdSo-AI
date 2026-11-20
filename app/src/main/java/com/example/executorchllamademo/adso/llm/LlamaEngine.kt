@@ -55,6 +55,11 @@ object LlamaEngine {
     private const val TAG = "AdsoLlama"
     const val MODEL_DIR = "/data/local/tmp/llama"
     private const val TOKENIZER = "$MODEL_DIR/tokenizer.model"
+
+    /** The app's own model folder (where the in-app download puts the model). Set once at start-up. */
+    var appModelDir: File? = null
+    private val modelDirs get() = listOfNotNull(appModelDir, File(MODEL_DIR))
+    private fun tokenizerFor(model: String) = File(File(model).parentFile, "tokenizer.model").takeIf { it.canRead() }?.absolutePath
     private const val CONTEXT = 2048
 
     enum class Status { NOT_LOADED, LOADING, READY, WORKING, MISSING, FAILED }
@@ -76,7 +81,8 @@ object LlamaEngine {
 
     /** Model files (.pte) on the phone, biggest first. */
     fun availableModels(): List<ModelFile> =
-        (File(MODEL_DIR).listFiles() ?: emptyArray())
+        modelDirs.flatMap { (it.listFiles() ?: emptyArray()).toList() }
+            .filter { tokenizerFor(it.absolutePath) != null }
             .filter { it.isFile && it.name.endsWith(".pte") && it.canRead() }
             .map { ModelFile(it.absolutePath, it.name, it.length() / 1e9f) }
             .sortedByDescending { it.sizeGb }
@@ -90,18 +96,17 @@ object LlamaEngine {
         if (s.modelFilePath.isNotBlank() && File(s.modelFilePath).canRead() && File(s.tokenizerFilePath).canRead()) {
             return s.modelFilePath to s.tokenizerFilePath
         }
-        if (!File(TOKENIZER).canRead()) return null
         val models = availableModels()
         // QAT+LoRA 1B first (Meta's more accurate 1B build, same size and speed), then any 1B, then the smallest.
         val default = models.firstOrNull { it.isQat && !it.is3b } ?: models.firstOrNull { it.name.contains("1B", ignoreCase = true) } ?: models.minByOrNull { it.sizeGb }
-        return default?.let { it.path to TOKENIZER }
+        return default?.let { m -> tokenizerFor(m.path)?.let { m.path to it } }
     }
 
     /** Remembers the learner's model choice (shared with the chat's model settings). Takes effect on next use. */
     fun selectModel(context: Context, path: String) {
         val prefs = DemoSharedPreferences(context)
         val s = prefs.getModuleSettings()
-        val tok = if (File(s.tokenizerFilePath).canRead()) s.tokenizerFilePath else TOKENIZER
+        val tok = tokenizerFor(path) ?: TOKENIZER
         prefs.saveModuleSettings(
             s.copy(
                 modelFilePath = path, tokenizerFilePath = tok, temperature = temperature.toDouble(),
@@ -134,7 +139,7 @@ object LlamaEngine {
             loadSeconds = (System.currentTimeMillis() - start) / 1000f
             status = Status.READY
             lastError = null
-            ETLogging.getInstance().log("AdSo loaded $modelName in ${loadSeconds}s (temperature $temperature)")
+            ETLogging.getInstance().log("AdSo loaded $modelName in ${loadSeconds}s (temperature $temperature")
             true
         } catch (e: Throwable) {
             Log.e(TAG, "load failed", e)
