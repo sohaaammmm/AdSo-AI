@@ -18,7 +18,7 @@ entirely on your phone with **ExecuTorch**. No internet. No account. Your data n
 ![Offline](https://img.shields.io/badge/Works-100%25%20offline-black)
 ![License](https://img.shields.io/badge/License-BSD-blue)
 
-*Bharat AI-SoC Challenge 2026–27 · Problem Statement 4 (Education)*
+*Bharat AI-SoC Challenge 2026–27 · Problem Statement 4 *
 
 </div>
 
