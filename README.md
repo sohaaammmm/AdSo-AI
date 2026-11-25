@@ -26,7 +26,7 @@ entirely on your phone with **ExecuTorch**. No internet. No account. Your data n
 
 ## 📱 Screenshots
 
-<p align="center"><img src="docs/images/screens.png" alt="AdSo AI app screens" width="820" /></p>
+<p align="center"><img src="docs/images/app-screens.png" alt="AdSo AI app screens" width="820" /></p>
 
 ## ✨ What AdSo does
 
