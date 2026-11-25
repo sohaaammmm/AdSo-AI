@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AdSo orb</title>
+<!-- #root is pinned to the whole view: inside the app's WebView a 100%-height chain can collapse to 0. -->
+<style>html,body{margin:0;background:transparent;overflow:hidden}#root{position:fixed;inset:0}</style>
+<script>
+  // Report problems to the app's log (EnergyOrb.kt forwards console messages to logcat, tag AdsoOrb).
+  window.addEventListener('error', function (e) { console.error('orb error: ' + e.message + ' @' + e.filename + ':' + e.lineno); });
+  window.addEventListener('unhandledrejection', function (e) { console.error('orb rejection: ' + (e.reason && e.reason.message || e.reason)); });
+  setTimeout(function () {
+    var c = document.querySelector('canvas');
+    console.log('orb ready: canvas=' + (c ? c.width + 'x' + c.height : 'none'));
+  }, 3000);
+</script>
+</head>
+<body>
+<div id="root"></div>
+<!-- orb.js is built from LlamaDemo/orb (npm run build). Runs offline. -->
+<script src="orb.js"></script>
+</body>
+</html>
