@@ -64,12 +64,12 @@ adb push Llama-3.2-1B-Instruct-QLORA_INT4_EO8.pte tokenizer.model /data/local/tm
 
 ```mermaid
 flowchart LR
-    A[Goal, time, interests] --> B[Skill check]
-    B --> C[Gap analysis]
-    C --> D[Llama 3.2 1B<br/>on-device via ExecuTorch]
-    D --> E[Pathway + weekly roadmap<br/>+ daily plan]
-    E --> F[Lessons & quizzes]
-    F -->|quiz results, chat requests| D
+    A["Goal, time, interests"] --> B["Skill check"]
+    B --> C["Gap analysis"]
+    C --> D["Llama 3.2 1B on-device via ExecuTorch"]
+    D --> E["Pathway, weekly roadmap, daily plan"]
+    E --> F["Lessons and quizzes"]
+    F -->|"quiz results, chat requests"| D
 ```
 
 A deterministic planning engine owns structure (levels, ordering, hours, schedule); Llama does the reasoning and
